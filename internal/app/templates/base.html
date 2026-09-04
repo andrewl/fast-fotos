@@ -8,16 +8,17 @@
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   {{if eq .Page "locations"}}<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>{{end}}
   <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=search,map,photo_library,build,calendar_month" />
 </head>
 <body class="page-{{.Page}}">
   <header>
     <a class="brand" href="/">Fast Fotos</a>
     <nav aria-label="Primary navigation">
-      <a href="/" title="Timeline"><span aria-hidden="true">&#128197;</span><span class="sr-only">Timeline</span></a>
-      <a href="/search" title="Search"><span aria-hidden="true">&#128269;</span><span class="sr-only">Search</span></a>
-      <a href="/locations" title="Map"><span aria-hidden="true">&#128506;</span><span class="sr-only">Map</span></a>
-      <a href="/galleries" title="Galleries"><span aria-hidden="true">&#128444;</span><span class="sr-only">Galleries</span></a>
-      <a href="/maintenance" title="Maintenance"><span aria-hidden="true">&#128736;</span><span class="sr-only">Maintenance</span></a>
+      <a href="/h" title="Timeline"><span aria-hidden="true" class="material-symbols-outlined">calendar_month</span><span class="sr-only">Timeline</span></a>
+      <a href="/search" title="Search"><span aria-hidden="true" class="material-symbols-outlined">search</span><span class="sr-only">Search</span></a>
+      <a href="/locations" title="Map"><span aria-hidden="true" class="material-symbols-outlined">map</span><span class="sr-only">Map</span></a>
+      <a href="/galleries" title="Galleries"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Galleries</span></a>
+      <a href="/maintenance" title="Maintenance"><span aria-hidden="true" class="material-symbols-outlined">build</span><span class="sr-only">Maintenance</span></a>
     </nav>
     <div class="header-actions">
       <details class="action-menu">
