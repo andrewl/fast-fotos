@@ -1,0 +1,33 @@
+{{define "search"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<aside class="search-filters">
+  <h2>Search photos</h2>
+  <form method="get" action="/search" data-search-form>
+    <label>From <input type="date" name="from" value="{{.Search.DateFrom}}"></label>
+    <label>To <input type="date" name="to" value="{{.Search.DateTo}}"></label>
+    <label>Label
+      <select name="label"><option value="">Any label</option>{{range .Search.Labels}}<option value="{{.}}"{{if eq . $.Search.Label}} selected{{end}}>{{.}}</option>{{end}}</select>
+    </label>
+    <label>Color
+      <select name="color"><option value="">Any color</option>{{range .Search.Colors}}<option value="{{.}}"{{if eq . $.Search.Color}} selected{{end}}>{{.}}</option>{{end}}</select>
+    </label>
+    <label>Camera
+      <select name="camera"><option value="">Any camera</option>{{range .Search.CameraModels}}<option value="{{.}}"{{if eq . $.Search.CameraModel}} selected{{end}}>{{.}}</option>{{end}}</select>
+    </label>
+    <label>Focal length
+      <select name="focal"><option value="">Any focal length</option>{{range .Search.FocalLengths}}<option value="{{.}}"{{if eq . $.Search.FocalLength}} selected{{end}}>{{.}} mm</option>{{end}}</select>
+    </label>
+    <label>Flash
+      <select name="flash"><option value="">Any</option><option value="yes"{{if eq .Search.Flash "yes"}} selected{{end}}>Fired</option><option value="no"{{if eq .Search.Flash "no"}} selected{{end}}>Did not fire</option></select>
+    </label>
+    <label>Location
+      <select name="location"><option value="">Any location</option>{{range .Search.Locations}}<option value="{{.Value}}"{{if eq .Value $.Search.Location}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+    </label>
+    <button type="submit">Search</button>
+    <button type="button" onclick="window.location.href='/search'">Clear filters</button>
+  </form>
+</aside>
+<section id="gallery">
+  {{template "gallery-content" .}}
+</section>
+{{end}}

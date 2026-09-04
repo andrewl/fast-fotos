@@ -1,0 +1,8 @@
+{{define "galleries"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<section class="galleries">
+  <div class="gallery-head"><h1>Galleries</h1></div>
+  {{range .Galleries}}<a class="gallery-link" href="/galleries/{{.ID}}"><strong>{{.Name}}</strong><span>{{.Count}} photos</span></a>{{else}}
+  <p>No custom galleries yet. Select photos from the timeline to create one.</p>{{end}}
+</section>
+{{end}}

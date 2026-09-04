@@ -1,0 +1,65 @@
+{{define "base"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fast Fotos</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  {{if eq .Page "locations"}}<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>{{end}}
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="page-{{.Page}}">
+  <header>
+    <a class="brand" href="/">Fast Fotos</a>
+    <nav aria-label="Primary navigation">
+      <a href="/" title="Timeline"><span aria-hidden="true">&#128197;</span><span class="sr-only">Timeline</span></a>
+      <a href="/search" title="Search"><span aria-hidden="true">&#128269;</span><span class="sr-only">Search</span></a>
+      <a href="/locations" title="Map"><span aria-hidden="true">&#128506;</span><span class="sr-only">Map</span></a>
+      <a href="/galleries" title="Galleries"><span aria-hidden="true">&#128444;</span><span class="sr-only">Galleries</span></a>
+      <a href="/maintenance" title="Maintenance"><span aria-hidden="true">&#128736;</span><span class="sr-only">Maintenance</span></a>
+    </nav>
+    <div class="header-actions">
+      <details class="action-menu">
+        <summary aria-label="Open actions menu"><span aria-hidden="true">&#9776;</span><span id="selection-count" class="selection-count" hidden></span><span class="sr-only">Actions</span></summary>
+        <div class="action-menu-panel">
+          <a href="/selected" title="Selected photos"><span aria-hidden="true">&#10003;</span><span class="sr-only">Selected photos</span></a>
+          <button type="button" id="add-to-gallery-action" disabled title="Add to gallery"><span aria-hidden="true">&#128193;</span><span class="sr-only">Add to gallery</span></button>
+          <button type="button" id="download-with-raw" disabled>Download with raw files</button>
+          <button type="button" id="download-without-raw" disabled>Download without raw files</button>
+          <button type="button" id="clear-selection" disabled title="Clear selection"><span aria-hidden="true">&#10005;</span><span class="sr-only">Clear selection</span></button>
+        </div>
+      </details>
+    </div>
+  </header>
+  <main>{{template "content" .}}</main>
+  <dialog id="add-to-gallery-dialog">
+    <form id="add-to-gallery-form" method="post" action="/galleries" hx-post="/galleries" hx-swap="none">
+      <input name="ids" type="hidden">
+      <h2>Add to gallery</h2>
+      <label>Existing gallery
+        <select name="gallery_id">
+          <option value="">Create a new gallery</option>
+          {{range .Galleries}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
+        </select>
+      </label>
+      <label>New gallery name <input name="name" maxlength="200"></label>
+      <p id="add-to-gallery-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="submit">Add photos</button><button type="button" data-close-gallery-dialog>Cancel</button></div>
+    </form>
+  </dialog>
+  <section id="photo-viewer" class="photo-viewer" hidden aria-label="Photo viewer">
+    <button type="button" id="photo-viewer-back" class="photo-viewer-back">Back to results</button>
+    <label class="photo-viewer-select"><input id="photo-viewer-checkbox" type="checkbox"> Select photo</label>
+    <figure>
+      <img alt="">
+      <figcaption class="photo-preview-caption">
+        <time class="photo-preview-taken-at"></time>
+        <span class="photo-preview-location"></span>
+      </figcaption>
+    </figure>
+  </section>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

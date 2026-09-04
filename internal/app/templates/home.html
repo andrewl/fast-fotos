@@ -1,0 +1,9 @@
+{{define "home"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<aside>
+  <h2>Timeline</h2>
+  {{range .Months}}<a class="month{{if eq .Key $.SelectedMonth}} active{{end}}"{{if eq .Key $.SelectedMonth}} aria-current="page"{{end}} href="{{timelinePath .Key}}">{{monthLabel .Key}} <span>{{.Count}}</span></a>{{else}}
+  <p>Your library is empty. Set <code>PHOTO_ROOT</code> and index it.</p>{{end}}
+</aside>
+<section id="gallery">{{template "gallery-content" .}}</section>
+{{end}}

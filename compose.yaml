@@ -1,0 +1,46 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8090:8090"
+    environment:
+      DATABASE_URL: postgres://fastfotos:fastfotos@db:5432/fastfotos?sslmode=disable
+      PHOTO_ROOT: /photos
+      INDEX_WORKER: 10
+      GEONAMES_DIR: /geonames
+      GEONAMES_AUTO_INSTALL: "true"
+      OBJECT_MODEL_DIR: /models
+      OBJECT_AUTO_INSTALL: "true"
+    volumes:
+      - type: bind
+        source: ${PHOTO_ROOT:-./photos}
+        target: /photos
+        read_only: true
+      - type: bind
+        source: ${GEONAMES_DIR:-fast-fotos-geonames}
+        target: /geonames
+      - type: volume
+        source: fast-fotos-models
+        target: /models
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: fastfotos
+      POSTGRES_PASSWORD: fastfotos
+      POSTGRES_DB: fastfotos
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastfotos -d fastfotos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    volumes:
+      - fast-fotos-data:/var/lib/postgresql/data
+volumes:
+  fast-fotos-data:
+  fast-fotos-geonames:
+  fast-fotos-models:

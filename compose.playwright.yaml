@@ -1,0 +1,18 @@
+services:
+  app:
+    ports: !override
+      - "18090:8090"
+    environment:
+      PHOTO_ROOT: /test-images
+      GEONAMES_DIR: ""
+      GEONAMES_AUTO_INSTALL: "false"
+      OBJECT_MODEL_DIR: ""
+      OBJECT_AUTO_INSTALL: "false"
+    volumes: !override
+      - type: bind
+        source: ./test-images
+        target: /test-images
+        read_only: true
+  db:
+    ports: !override []
+    volumes: !override []

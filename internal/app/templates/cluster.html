@@ -1,0 +1,10 @@
+{{define "cluster"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<aside>
+  <h2>Map cluster</h2>
+  <a href="{{.MapReturnURL}}">Back to map</a>
+</aside>
+<section id="gallery">
+  {{template "gallery-content" .}}
+</section>
+{{end}}

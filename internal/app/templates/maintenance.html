@@ -1,0 +1,13 @@
+{{define "maintenance"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<section class="maintenance">
+  <h1>Maintenance</h1>
+  <p>Manage photo indexing and refresh metadata, locations, and object labels.</p>
+  <div class="maintenance-actions">
+    <form hx-post="/index" hx-swap="none" data-indexing><button type="submit">Index photos</button></form>
+    <form hx-post="/reindex" hx-swap="none" data-indexing><button type="submit">Reindex all</button></form>
+    <form hx-post="/stop-indexing" hx-swap="none" data-stop-indexing hidden><button type="submit">Stop indexing</button></form>
+  </div>
+  <p id="index-progress" aria-live="polite" hidden></p>
+</section>
+{{end}}

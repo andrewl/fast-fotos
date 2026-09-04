@@ -1,0 +1,25 @@
+{{define "image"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<aside class="image-info">
+  <a href="{{.ReturnURL}}">Back to {{.CollectionName}}</a>
+  <h2>Photo details</h2>
+  <label><input data-photo-selection type="checkbox" value="{{.Photo.ID}}"> Select photo</label>
+  {{if .Photo.RawPath}}<p>Raw file available</p><a href="/raw/{{.Photo.ID}}">Download raw</a>{{end}}
+  <dl>
+    <dt>Captured</dt><dd>{{photoTakenAt .Photo.TakenAt}}</dd>
+    {{if .Photo.Location}}<dt>Location</dt><dd>{{.Photo.Location}}</dd>{{end}}
+    {{if .Photo.CameraModel}}<dt>Camera</dt><dd>{{.Photo.CameraModel}}</dd>{{end}}
+    {{if .Photo.FocalLength}}<dt>Focal length</dt><dd>{{photoFocalLength .Photo.FocalLength}}</dd>{{end}}
+    {{if .Photo.FlashFired}}<dt>Flash</dt><dd>{{photoFlash .Photo.FlashFired}}</dd>{{end}}
+    {{if .Photo.Objects}}<dt>Labels</dt><dd>{{join .Photo.Objects ", "}}</dd>{{end}}
+    {{if .Photo.DominantColors}}<dt>Dominant colors</dt><dd>{{join .Photo.DominantColors ", "}}</dd>{{end}}
+  </dl>
+  <div class="image-navigation">
+    {{if .PreviousPhotoID}}<a href="{{imagePath .PreviousPhotoID .ReturnURL}}" data-image-previous>Previous</a>{{end}}
+    {{if .NextPhotoID}}<a href="{{imagePath .NextPhotoID .ReturnURL}}" data-image-next>Next</a>{{end}}
+  </div>
+</aside>
+<section class="image-panel">
+  <img src="/photos/{{.Photo.ID}}" alt="{{.Photo.Path}}">
+</section>
+{{end}}
