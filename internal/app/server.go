@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"database/sql"
 	"log/slog"
 
 	"github.com/andrewl/fast-fotos/internal/geocode"
@@ -82,7 +83,7 @@ type Photo struct {
 	Settlement     string
 	Region         string
 	Country        string
-	CameraModel    string
+	CameraModel    sql.NullString
 	FocalLength    *float64
 	FlashFired     *bool
 	Objects        []string
