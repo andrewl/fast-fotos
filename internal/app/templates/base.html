@@ -17,35 +17,34 @@
       <a href="/h" title="Timeline"><span aria-hidden="true" class="material-symbols-outlined">calendar_month</span><span class="sr-only">Timeline</span></a>
       <a href="/search" title="Search"><span aria-hidden="true" class="material-symbols-outlined">search</span><span class="sr-only">Search</span></a>
       <a href="/locations" title="Map"><span aria-hidden="true" class="material-symbols-outlined">map</span><span class="sr-only">Map</span></a>
-      <a href="/galleries" title="Galleries"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Galleries</span></a>
+      <a href="/collections" title="Collections"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Collections</span></a>
       <a href="/maintenance" title="Maintenance"><span aria-hidden="true" class="material-symbols-outlined">build</span><span class="sr-only">Maintenance</span></a>
     </nav>
     <div class="header-actions">
       <details class="action-menu">
         <summary aria-label="Open actions menu"><span aria-hidden="true">&#9776;</span><span id="selection-count" class="selection-count" hidden></span><span class="sr-only">Actions</span></summary>
         <div class="action-menu-panel">
-          <a href="/selected" title="Selected photos"><span aria-hidden="true">&#10003;</span><span class="sr-only">Selected photos</span></a>
-          <button type="button" id="add-to-gallery-action" disabled title="Add to gallery"><span aria-hidden="true">&#128193;</span><span class="sr-only">Add to gallery</span></button>
-          <button type="button" id="download-with-raw" disabled>Download with raw files</button>
-          <button type="button" id="download-without-raw" disabled>Download without raw files</button>
-          <button type="button" id="clear-selection" disabled title="Clear selection"><span aria-hidden="true">&#10005;</span><span class="sr-only">Clear selection</span></button>
+          <button type="button" id="add-to-collection-action" disabled>Add selected photos to collection</button>
+          <button type="button" id="download-with-raw" disabled>Download selected with raw files</button>
+          <button type="button" id="download-without-raw" disabled>Download selected without raw files</button>
+          <button type="button" id="clear-selection" disabled>Clear selected photos</button>
         </div>
       </details>
     </div>
   </header>
   <main>{{template "content" .}}</main>
-  <dialog id="add-to-gallery-dialog">
-    <form id="add-to-gallery-form" method="post" action="/galleries" hx-post="/galleries" hx-swap="none">
+  <dialog id="add-to-collection-dialog">
+    <form id="add-to-collection-form" method="post" action="/collections" hx-post="/collections" hx-swap="none">
       <input name="ids" type="hidden">
       <h2>Add to gallery</h2>
       <label>Existing gallery
         <select name="gallery_id">
           <option value="">Create a new gallery</option>
-          {{range .Galleries}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
+          {{range .Collections}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
         </select>
       </label>
-      <label>New gallery name <input name="name" maxlength="200"></label>
-      <p id="add-to-gallery-error" role="alert" hidden></p>
+      <label>New collection name <input name="name" maxlength="200"></label>
+      <p id="add-to-collection-error" role="alert" hidden></p>
       <div class="dialog-actions"><button type="submit">Add photos</button><button type="button" data-close-gallery-dialog>Cancel</button></div>
     </form>
   </dialog>

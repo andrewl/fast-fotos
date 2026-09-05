@@ -1,6 +1,6 @@
 {{define "gallery"}}{{template "gallery-content" .}}{{end}}
 {{define "gallery-content"}}
-<div class="gallery-head"><h1>{{if .Gallery}}{{.Gallery.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Recent photos{{end}}</h1>{{if or (eq .Page "search") (eq .Page "selected")}}<span class="search-result-count">{{len .Photos}} photos</span>{{end}}</div>
+<div class="gallery-head"><h1>{{if .Collection}}{{.Collection.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Recent photos{{end}}</h1>{{if or (eq .Page "search") (eq .Page "selected")}}<span class="search-result-count">{{len .Photos}} photos</span>{{end}}</div>
 <div class="grid">
 {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}" aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
 {{else}}<p>{{if or (eq .Page "search") (eq .Page "selected")}}No photos found{{else}}No photos in this month.{{end}}</p>{{end}}

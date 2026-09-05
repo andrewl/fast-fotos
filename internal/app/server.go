@@ -94,8 +94,8 @@ type Month struct {
 	Count int
 }
 
-// Gallery represents a custom photo collection.
-type Gallery struct {
+// Collection represents a custom photo collection.
+type Collection struct {
 	ID    int64
 	Name  string
 	Count int
@@ -107,9 +107,9 @@ type PageData struct {
 	Photos             []Photo
 	Photo              *Photo
 	Months             []Month
-	Galleries          []Gallery
+	Collections          []Collection
 	SelectedMonth      string
-	Gallery            *Gallery
+	Collection            *Collection
 	PhotoRoot          string
 	Locations          []LocationGroup
 	SelectedLocation   string
@@ -219,9 +219,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /cluster", s.cluster)
 	mux.HandleFunc("GET /api/map-points", s.mapPoints)
 	mux.HandleFunc("GET /api/map-cluster", s.mapCluster)
-	mux.HandleFunc("GET /galleries", s.galleriesPage)
-	mux.HandleFunc("GET /galleries/", s.gallery)
-	mux.HandleFunc("POST /galleries", s.addToGallery)
+	mux.HandleFunc("GET /collections", s.collectionsPage)
+	mux.HandleFunc("GET /collection/", s.collection)
+	mux.HandleFunc("POST /collections", s.addToCollection)
 	mux.HandleFunc("POST /index", s.index)
 	mux.HandleFunc("POST /reindex", s.reindex)
 	mux.HandleFunc("POST /stop-indexing", s.stopIndexing)
@@ -286,13 +286,13 @@ func (s *Server) migrate(ctx context.Context) error {
 			id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
 			last_indexed_at TIMESTAMPTZ NOT NULL
 		);
-		CREATE TABLE IF NOT EXISTS galleries (
+		CREATE TABLE IF NOT EXISTS collections (
 			id BIGSERIAL PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL CHECK (length(trim(name)) > 0),
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
-		CREATE TABLE IF NOT EXISTS gallery_photos (
-			gallery_id BIGINT NOT NULL REFERENCES galleries(id) ON DELETE CASCADE,
+		CREATE TABLE IF NOT EXISTS collection_photos (
+			gallery_id BIGINT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
 			photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
 			PRIMARY KEY (gallery_id, photo_id)
 		);
@@ -346,12 +346,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "home", PageData{Months: months, Galleries: galleries, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
+	s.render(w, "home", PageData{Months: months, Collections: galleries, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
 }
 
 // timeline renders the photo gallery for a specific month (e.g. /timeline/2026-08).
@@ -374,12 +374,12 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "home", PageData{Page: "home", Months: months, Galleries: galleries, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
+	s.render(w, "home", PageData{Page: "home", Months: months, Collections: galleries, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
 }
 
 // image renders the detail page for a single photo including EXIF metadata and navigation links.
@@ -404,12 +404,12 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previousID, nextID := adjacentPhotoIDs(collection, id)
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "image", PageData{Page: "image", Photo: &photo, Galleries: galleries, ReturnURL: returnURL, CollectionName: collectionName, PreviousPhotoID: previousID, NextPhotoID: nextID})
+	s.render(w, "image", PageData{Page: "image", Photo: &photo, Collections: galleries, ReturnURL: returnURL, CollectionName: collectionName, PreviousPhotoID: previousID, NextPhotoID: nextID})
 }
 
 // search renders the photo search form and filtered search result thumbnail grid.
@@ -488,12 +488,12 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "search", PageData{Page: "search", Photos: photos, Galleries: galleries, Search: search, ReturnURL: r.URL.RequestURI()})
+	s.render(w, "search", PageData{Page: "search", Photos: photos, Collections: galleries, Search: search, ReturnURL: r.URL.RequestURI()})
 }
 
 // selected renders the view displaying all currently selected photos for the user's session.
@@ -503,12 +503,12 @@ func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
 		return
 	}
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "selected", PageData{Page: "selected", Photos: photos, Galleries: galleries, ReturnURL: "/selected"})
+	s.render(w, "selected", PageData{Page: "selected", Photos: photos, Collections: galleries, ReturnURL: "/selected"})
 }
 
 // selection responds with a JSON array of photo IDs selected in the current session.
@@ -632,14 +632,14 @@ func (s *Server) imageCollection(ctx context.Context, from, selectionToken strin
 	case collectionURL.Path == "/cluster":
 		photos, err := s.clusterPhotos(ctx, collectionURL.Query())
 		return collectionURL.RequestURI(), "Map cluster", photos, err
-	case strings.HasPrefix(collectionURL.Path, "/galleries/"):
-		galleryID, err := strconv.ParseInt(strings.TrimPrefix(collectionURL.Path, "/galleries/"), 10, 64)
+	case strings.HasPrefix(collectionURL.Path, "/collections/"):
+		galleryID, err := strconv.ParseInt(strings.TrimPrefix(collectionURL.Path, "/collections/"), 10, 64)
 		if err != nil || galleryID < 1 {
 			return "", "", nil, errors.New("invalid gallery")
 		}
-		photos, err := s.photosForGallery(ctx, galleryID)
+		photos, err := s.photosForCollection(ctx, galleryID)
 		var name string
-		err = s.pool.QueryRow(ctx, `SELECT name FROM galleries WHERE id = $1`, galleryID).Scan(&name)
+		err = s.pool.QueryRow(ctx, `SELECT name from collections WHERE id = $1`, galleryID).Scan(&name)
 		return collectionURL.Path, name, photos, err
 	case collectionURL.Path == "/search" || strings.HasPrefix(collectionURL.Path, "/search/"):
 		query := collectionURL.Query()
@@ -693,12 +693,12 @@ func adjacentPhotoIDs(photos []Photo, currentID int64) (int64, int64) {
 
 // maintenance renders the system management page for indexing control and status monitoring.
 func (s *Server) maintenance(w http.ResponseWriter, r *http.Request) {
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "maintenance", PageData{Page: "maintenance", Galleries: galleries})
+	s.render(w, "maintenance", PageData{Page: "maintenance", Collections: galleries})
 }
 
 // distinctValues executes a SQL query returning a slice of distinct string column values.
@@ -1017,48 +1017,48 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 }
 
 // galleriesPage renders the custom galleries list page or redirects to the first gallery.
-func (s *Server) galleriesPage(w http.ResponseWriter, r *http.Request) {
-	galleries, err := s.galleries(r.Context())
+func (s *Server) collectionsPage(w http.ResponseWriter, r *http.Request) {
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
 	if len(galleries) > 0 {
-		http.Redirect(w, r, fmt.Sprintf("/galleries/%d", galleries[0].ID), http.StatusSeeOther)
+		http.Redirect(w, r, fmt.Sprintf("/collections/%d", galleries[0].ID), http.StatusSeeOther)
 		return
 	}
-	s.render(w, "galleries", PageData{Galleries: galleries})
+	s.render(w, "galleries", PageData{Collections: galleries})
 }
 
 // gallery renders the detail grid page for a custom user gallery.
-func (s *Server) gallery(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/galleries/"), 10, 64)
+func (s *Server) collection(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/collections/"), 10, 64)
 	if err != nil || id < 1 {
 		http.NotFound(w, r)
 		return
 	}
-	var gallery Gallery
+	var collection Collection 
 	if err := s.pool.QueryRow(r.Context(), `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		FROM galleries g LEFT JOIN gallery_photos gp ON gp.gallery_id = g.id
-		WHERE g.id = $1 GROUP BY g.id`, id).Scan(&gallery.ID, &gallery.Name, &gallery.Count); err != nil {
+		from collections g LEFT JOIN collection_photos gp ON gp.gallery_id = g.id
+		WHERE g.id = $1 GROUP BY g.id`, id).Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	photos, err := s.photosForGallery(r.Context(), id)
+	photos, err := s.photosForCollection(r.Context(), id)
 	if err != nil {
 		http.Error(w, "Could not load gallery", http.StatusInternalServerError)
 		return
 	}
-	galleries, err := s.galleries(r.Context())
+	galleries, err := s.collections(r.Context())
 	if err != nil {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "custom-gallery", PageData{Galleries: galleries, Gallery: &gallery, Photos: photos, ReturnURL: r.URL.Path})
+	s.render(w, "collection", PageData{Collections: galleries, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
 }
 
-// addToGallery adds selected photo IDs to an existing or newly created custom gallery.
-func (s *Server) addToGallery(w http.ResponseWriter, r *http.Request) {
+// addToCollection adds selected photo IDs to an existing or newly created custom gallery.
+func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
 		http.Error(w, "Select at least one photo", http.StatusBadRequest)
@@ -1069,7 +1069,7 @@ func (s *Server) addToGallery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	tag, err := s.pool.Exec(r.Context(), `INSERT INTO gallery_photos (gallery_id, photo_id)
+	tag, err := s.pool.Exec(r.Context(), `INSERT INTO collection_photos (gallery_id, photo_id)
 		SELECT $1, id FROM photos WHERE id = ANY(string_to_array($2, ',')::bigint[])
 		ON CONFLICT DO NOTHING`, galleryID, ids)
 	if err != nil {
@@ -1080,7 +1080,7 @@ func (s *Server) addToGallery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/galleries/%d", galleryID))
+	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1092,7 +1092,7 @@ func (s *Server) selectGallery(ctx context.Context, existingID, name string) (in
 			return 0, fmt.Errorf("invalid gallery")
 		}
 		var found bool
-		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM galleries WHERE id = $1)", id).Scan(&found); err != nil {
+		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 from collections WHERE id = $1)", id).Scan(&found); err != nil {
 			return 0, fmt.Errorf("look up gallery: %w", err)
 		}
 		if !found {
@@ -1395,29 +1395,29 @@ func (s *Server) photosForMonth(ctx context.Context, month string) ([]Photo, err
 }
 
 // galleries queries all user-created galleries and their photo counts.
-func (s *Server) galleries(ctx context.Context) ([]Gallery, error) {
+func (s *Server) collections(ctx context.Context) ([]Collection, error) {
 	rows, err := s.pool.Query(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		FROM galleries g LEFT JOIN gallery_photos gp ON gp.gallery_id = g.id
+		from collections g LEFT JOIN collection_photos gp ON gp.gallery_id = g.id
 		GROUP BY g.id ORDER BY g.name ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var galleries []Gallery
+	var collections []Collection
 	for rows.Next() {
-		var gallery Gallery
-		if err := rows.Scan(&gallery.ID, &gallery.Name, &gallery.Count); err != nil {
+		var collection Collection 
+		if err := rows.Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
 			return nil, err
 		}
-		galleries = append(galleries, gallery)
+		collections = append(collections, collection)
 	}
-	return galleries, rows.Err()
+	return collections, rows.Err()
 }
 
-// photosForGallery queries all photos assigned to a specific custom gallery ID.
-func (s *Server) photosForGallery(ctx context.Context, galleryID int64) ([]Photo, error) {
+// photosForCollection queries all photos assigned to a specific custom gallery ID.
+func (s *Server) photosForCollection(ctx context.Context, galleryID int64) ([]Photo, error) {
 	rows, err := s.pool.Query(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors FROM photos p
-		JOIN gallery_photos gp ON gp.photo_id = p.id WHERE gp.gallery_id = $1 ORDER BY p.taken_at ASC`, galleryID)
+		JOIN collection_photos gp ON gp.photo_id = p.id WHERE gp.gallery_id = $1 ORDER BY p.taken_at ASC`, galleryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1499,7 +1499,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"locations":      {"templates/base.html", "templates/locations.html"},
 		"cluster":        {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
 		"galleries":      {"templates/base.html", "templates/galleries.html"},
-		"custom-gallery": {"templates/base.html", "templates/custom-gallery.html", "templates/gallery.html"},
+		"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {

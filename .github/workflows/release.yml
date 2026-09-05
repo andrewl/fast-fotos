@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release assets
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goarch: amd64
+            suffix: linux-amd64
+          - goarch: arm64
+            suffix: linux-arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install cross compiler
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build archive
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          ASSET_SUFFIX: ${{ matrix.suffix }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if [ "${GOARCH}" = "arm64" ]; then
+            export CC=aarch64-linux-gnu-gcc
+          fi
+          CGO_ENABLED=1 GOOS=linux GOARCH=${GOARCH} go build -trimpath -ldflags="-s -w" -o fast-fotos ./cmd/fast-fotos
+          tar -czf "fast-fotos-${ASSET_SUFFIX}.tar.gz" fast-fotos scripts/install-geonames.sh scripts/install-onnx.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: fast-fotos-${{ matrix.suffix }}.tar.gz
+
+  publish:
+    name: Publish GitHub release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: assets/*

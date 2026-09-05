@@ -1,9 +1,0 @@
-{{define "custom-gallery"}}{{template "base" .}}{{end}}
-{{define "content"}}
-<aside>
-  <h2>Galleries</h2>
-  {{range .Galleries}}<a class="month{{if and $.Gallery (eq .ID $.Gallery.ID)}} active{{end}}"{{if and $.Gallery (eq .ID $.Gallery.ID)}} aria-current="page"{{end}} href="/galleries/{{.ID}}">{{.Name}} <span>{{.Count}}</span></a>{{else}}
-  <p>No galleries yet.</p>{{end}}
-</aside>
-<section id="gallery">{{template "gallery-content" .}}</section>
-{{end}}

@@ -99,3 +99,12 @@ Features
 - view photo metadata
 - select one or more images
 - download selection with or without associated raw files, including same-basename sidecar files
+
+Running tests
+
+go test -v ./...
+npm run test:e2e
+
+TODO
+- Needs work on selected photos - better gallery, action buttons moved from the menu
+- Beef up tests - take screenshot on failed tests

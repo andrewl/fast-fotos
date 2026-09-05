@@ -6,7 +6,7 @@ services:
     environment:
       DATABASE_URL: postgres://fastfotos:fastfotos@db:5432/fastfotos?sslmode=disable
       PHOTO_ROOT: /photos
-      INDEX_WORKER: 10
+      INDEX_WORKER: 4
       GEONAMES_DIR: /geonames
       GEONAMES_AUTO_INSTALL: "true"
       OBJECT_MODEL_DIR: /models
