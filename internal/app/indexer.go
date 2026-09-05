@@ -274,11 +274,9 @@ func associatedRawPath(imagePath string) (string, error) {
 
 // readMetadata extracts EXIF header information (timestamp, GPS, camera model, focal length, flash status) from an image file.
 func readMetadata(path string) (time.Time, *float64, *float64, string, *float64, *bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, nil, nil, "", nil, nil, err
-	}
-	takenAt := info.ModTime()
+	//default taken at is 0000-01-01 00:00:00 UTC
+	takenAt := time.Time{}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return time.Time{}, nil, nil, "", nil, nil, err

@@ -108,3 +108,6 @@ npm run test:e2e
 TODO
 - Needs work on selected photos - better gallery, action buttons moved from the menu
 - Beef up tests - take screenshot on failed tests
+- This Week page? All items taken this week
+- Check urls
+- Export selection to csv

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"log/slog"
 
 	"github.com/andrewl/fast-fotos/internal/geocode"
 	"github.com/andrewl/fast-fotos/internal/objects"
@@ -332,6 +333,7 @@ func (s *Server) recordIndexedAt(ctx context.Context, indexedAt time.Time) error
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	months, err := s.months(r.Context())
 	if err != nil {
+		slog.Error("Failed to load months", "error", err)
 		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
 		return
 	}
@@ -342,12 +344,14 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		selectedMonth = months[0].Key
 		photos, err = s.photosForMonth(r.Context(), months[0].Key)
 		if err != nil {
+			slog.Error("Failed to load photos for month", "month", months[0].Key, "error", err)
 			http.Error(w, "Could not load photos", http.StatusInternalServerError)
 			return
 		}
 	}
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -366,16 +370,19 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 	}
 	months, err := s.months(r.Context())
 	if err != nil {
+		slog.Error("Failed to load months", "error", err)
 		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
 		return
 	}
 	photos, err := s.photosForMonth(r.Context(), month)
 	if err != nil {
+		slog.Error("Failed to load photos for month", "month", month, "error", err)
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -406,6 +413,7 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 	previousID, nextID := adjacentPhotoIDs(collection, id)
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -440,12 +448,14 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasPrefix(search.Location, "region:") {
 		search.Region = strings.TrimPrefix(search.Location, "region:")
 	} else if search.Location != "" {
+		slog.Error("Invalid location filter", "location", search.Location)
 		http.Error(w, "Invalid location filter", http.StatusBadRequest)
 		return
 	}
 	for _, value := range []string{search.DateFrom, search.DateTo} {
 		if value != "" {
 			if _, err := time.Parse("2006-01-02", value); err != nil {
+				slog.Error("Invalid search date", "date", value, "error", err)
 				http.Error(w, "Invalid search date", http.StatusBadRequest)
 				return
 			}
@@ -454,42 +464,51 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	if search.FocalLength != "" {
 		focalLength, err := strconv.ParseFloat(search.FocalLength, 64)
 		if err != nil || focalLength < 0 {
+			slog.Error("Invalid focal length", "focal_length", search.FocalLength, "error", err)
 			http.Error(w, "Invalid focal length", http.StatusBadRequest)
 			return
 		}
 	}
 	if search.Flash != "" && search.Flash != "yes" && search.Flash != "no" {
+		slog.Error("Invalid flash filter", "flash", search.Flash)
 		http.Error(w, "Invalid flash filter", http.StatusBadRequest)
 		return
 	}
 	photos, err := s.searchPhotos(r.Context(), search)
 	if err != nil {
+		slog.Error("Failed to search photos", "error", err)
 		http.Error(w, "Could not search photos", http.StatusInternalServerError)
 		return
 	}
 	if search.CameraModels, err = s.distinctValues(r.Context(), `SELECT DISTINCT camera_model FROM photos WHERE camera_model IS NOT NULL AND camera_model <> '' ORDER BY camera_model`); err != nil {
+		slog.Error("Failed to load camera models", "error", err)
 		http.Error(w, "Could not load camera models", http.StatusInternalServerError)
 		return
 	}
 	if search.Locations, err = s.searchLocations(r.Context()); err != nil {
+		slog.Error("Failed to load locations", "error", err)
 		http.Error(w, "Could not load locations", http.StatusInternalServerError)
 		return
 	}
 	if search.FocalLengths, err = s.distinctValues(r.Context(), `SELECT DISTINCT focal_length::text FROM photos WHERE focal_length IS NOT NULL ORDER BY focal_length`); err != nil {
+		slog.Error("Failed to load focal lengths", "error", err)
 		http.Error(w, "Could not load focal lengths", http.StatusInternalServerError)
 		return
 	}
 	if search.Labels, err = s.distinctValues(r.Context(), `SELECT DISTINCT unnest(objects) FROM photos ORDER BY 1`); err != nil {
+		slog.Error("Failed to load labels", "error", err)
 		http.Error(w, "Could not load labels", http.StatusInternalServerError)
 		return
 	}
 	if search.Colors, err = s.distinctValues(r.Context(), `SELECT DISTINCT unnest(dominant_colors) FROM photos ORDER BY 1`); err != nil {
+		slog.Error("Failed to load colors", "error", err)
 		http.Error(w, "Could not load colors", http.StatusInternalServerError)
 		return
 	}
 
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -500,11 +519,13 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
 	photos, err := s.selectedPhotos(r.Context(), s.selectionToken(w, r))
 	if err != nil {
+		slog.Error("Failed to load selected photos", "error", err)
 		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
 		return
 	}
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -515,6 +536,7 @@ func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
 func (s *Server) selection(w http.ResponseWriter, r *http.Request) {
 	ids, err := s.selectionIDs(r.Context(), s.selectionToken(w, r))
 	if err != nil {
+		slog.Error("Failed to load selection", "error", err)
 		http.Error(w, "Could not load selection", http.StatusInternalServerError)
 		return
 	}
@@ -526,6 +548,7 @@ func (s *Server) selection(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateSelection(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
 	if err != nil || id < 1 {
+		slog.Error("Invalid photo ID", "id", r.FormValue("id"), "error", err)
 		http.Error(w, "Invalid photo ID", http.StatusBadRequest)
 		return
 	}
@@ -537,6 +560,7 @@ func (s *Server) updateSelection(w http.ResponseWriter, r *http.Request) {
 		_, err = s.pool.Exec(r.Context(), `DELETE FROM selection_photos WHERE session_token = $1 AND photo_id = $2`, token, id)
 	}
 	if err != nil {
+		slog.Error("Failed to update selection", "error", err)
 		http.Error(w, "Could not update selection", http.StatusInternalServerError)
 		return
 	}
@@ -546,6 +570,7 @@ func (s *Server) updateSelection(w http.ResponseWriter, r *http.Request) {
 // clearSelection removes all selected photos for the current session token.
 func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.pool.Exec(r.Context(), `DELETE FROM selection_photos WHERE session_token = $1`, s.selectionToken(w, r)); err != nil {
+		slog.Error("Failed to clear selection", "error", err)
 		http.Error(w, "Could not clear selection", http.StatusInternalServerError)
 		return
 	}
@@ -560,6 +585,7 @@ func (s *Server) selectionToken(w http.ResponseWriter, r *http.Request) string {
 	}
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
+		slog.Error("Failed to generate selection token", "error", err)
 		http.Error(w, "Could not create selection session", http.StatusInternalServerError)
 		return ""
 	}
@@ -695,6 +721,7 @@ func adjacentPhotoIDs(photos []Photo, currentID int64) (int64, int64) {
 func (s *Server) maintenance(w http.ResponseWriter, r *http.Request) {
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -773,11 +800,13 @@ func (s *Server) searchPhotos(ctx context.Context, search SearchData) ([]Photo, 
 func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 	month := strings.TrimPrefix(r.URL.Path, "/months/")
 	if !validMonth(month) {
+		slog.Error("Invalid month format", "month", month)
 		http.Error(w, "Invalid month", http.StatusBadRequest)
 		return
 	}
 	photos, err := s.photosForMonth(r.Context(), month)
 	if err != nil {
+		slog.Error("Failed to load photos for month", "month", month, "error", err)
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
@@ -788,6 +817,7 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 	locationGroups, err := s.locationGroups(r.Context())
 	if err != nil {
+		slog.Error("Failed to load locations", "error", err)
 		http.Error(w, "Could not load locations", http.StatusInternalServerError)
 		return
 	}
@@ -798,6 +828,7 @@ func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 	if selectedSettlement != "" || selectedRegion != "" {
 		bounds, err = s.locationBounds(r.Context(), selectedSettlement, selectedRegion)
 		if err != nil {
+			slog.Error("Failed to load location bounds", "settlement", selectedSettlement, "region", selectedRegion, "error", err)
 			http.Error(w, "Could not load location bounds", http.StatusInternalServerError)
 			return
 		}
@@ -811,6 +842,7 @@ func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 	photos, err := s.clusterPhotos(r.Context(), r.URL.Query())
 	if err != nil {
+		slog.Error("Failed to load cluster photos", "error", err)
 		http.Error(w, "Invalid cluster", http.StatusBadRequest)
 		return
 	}
@@ -862,27 +894,34 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil {
+		slog.Error("Invalid minimum latitude", "error", err)
 		http.Error(w, "Invalid minimum latitude", http.StatusBadRequest)
 		return
 	}
 	maxLatitude, err := strconv.ParseFloat(query.Get("maxLat"), 64)
 	if err != nil {
+		slog.Error("Invalid maximum latitude", "error", err)
 		http.Error(w, "Invalid maximum latitude", http.StatusBadRequest)
 		return
 	}
 	minLongitude, err := strconv.ParseFloat(query.Get("minLng"), 64)
 	if err != nil {
+		slog.Error("Invalid minimum longitude", "error", err)
 		http.Error(w, "Invalid minimum longitude", http.StatusBadRequest)
 		return
 	}
 	maxLongitude, err := strconv.ParseFloat(query.Get("maxLng"), 64)
 	if err != nil {
+		slog.Error("Invalid maximum longitude", "error", err)
 		http.Error(w, "Invalid maximum longitude", http.StatusBadRequest)
 		return
 	}
 	zoom, err := strconv.Atoi(query.Get("zoom"))
 	if err != nil || zoom < 0 || zoom > 22 || minLatitude < -90 || maxLatitude > 90 ||
 		minLongitude < -180 || maxLongitude > 180 || minLatitude >= maxLatitude || minLongitude >= maxLongitude {
+
+		slog.Error("Invalid map bounds or zoom level", "minLat", minLatitude, "maxLat", maxLatitude,
+			"minLng", minLongitude, "maxLng", maxLongitude, "zoom", zoom, "error", err)
 		http.Error(w, "Invalid map bounds", http.StatusBadRequest)
 		return
 	}
@@ -897,6 +936,8 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 		GROUP BY floor((latitude + 90) / $5::double precision), floor((longitude + 180) / $5::double precision)
 		ORDER BY MIN(id) LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude, cellSize, settlement, region)
 	if err != nil {
+		slog.Error("Failed to load map points", "minLat", minLatitude, "maxLat", maxLatitude,
+			"minLng", minLongitude, "maxLng", maxLongitude, "zoom", zoom, "settlement", settlement, "region", region, "error", err)
 		http.Error(w, "Could not load map points", http.StatusInternalServerError)
 		return
 	}
@@ -907,18 +948,21 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 		var point mapPoint
 		if err := rows.Scan(&point.Latitude, &point.Longitude, &point.Count, &point.PhotoID,
 			&point.MinLatitude, &point.MinLongitude, &point.MaxLatitude, &point.MaxLongitude); err != nil {
+			slog.Error("Failed to scan map point", "error", err)
 			http.Error(w, "Could not load map points", http.StatusInternalServerError)
 			return
 		}
 		points = append(points, point)
 	}
 	if err := rows.Err(); err != nil {
+		slog.Error("Error iterating map points", "error", err)
 		http.Error(w, "Could not load map points", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=30")
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(points); err != nil {
+		slog.Error("Failed to encode map points", "error", err)
 		http.Error(w, "Could not encode map points", http.StatusInternalServerError)
 	}
 }
@@ -928,21 +972,25 @@ func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil || minLatitude < -90 || minLatitude > 90 {
+		slog.Error("Invalid cluster minimum latitude", "error", err)
 		http.Error(w, "Invalid cluster minimum latitude", http.StatusBadRequest)
 		return
 	}
 	maxLatitude, err := strconv.ParseFloat(query.Get("maxLat"), 64)
 	if err != nil || maxLatitude < -90 || maxLatitude > 90 || minLatitude > maxLatitude {
+		slog.Error("Invalid cluster maximum latitude", "error", err)
 		http.Error(w, "Invalid cluster maximum latitude", http.StatusBadRequest)
 		return
 	}
 	minLongitude, err := strconv.ParseFloat(query.Get("minLng"), 64)
 	if err != nil || minLongitude < -180 || minLongitude > 180 {
+		slog.Error("Invalid cluster minimum longitude", "error", err)
 		http.Error(w, "Invalid cluster minimum longitude", http.StatusBadRequest)
 		return
 	}
 	maxLongitude, err := strconv.ParseFloat(query.Get("maxLng"), 64)
 	if err != nil || maxLongitude < -180 || maxLongitude > 180 || minLongitude > maxLongitude {
+		slog.Error("Invalid cluster maximum longitude", "error", err)
 		http.Error(w, "Invalid cluster maximum longitude", http.StatusBadRequest)
 		return
 	}
@@ -952,6 +1000,8 @@ func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 		WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
 		ORDER BY taken_at ASC, id ASC LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude)
 	if err != nil {
+		slog.Error("Failed to load cluster photos", "minLat", minLatitude, "maxLat", maxLatitude,
+			"minLng", minLongitude, "maxLng", maxLongitude, "error", err)
 		http.Error(w, "Could not load cluster photos", http.StatusInternalServerError)
 		return
 	}
@@ -961,18 +1011,21 @@ func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var photo mapPoint
 		if err := rows.Scan(&photo.PhotoID, &photo.Latitude, &photo.Longitude, &photo.Path, &photo.TakenAt, &photo.Location); err != nil {
+			slog.Error("Failed to scan cluster photo", "error", err)
 			http.Error(w, "Could not read cluster photos", http.StatusInternalServerError)
 			return
 		}
 		photos = append(photos, photo)
 	}
 	if err := rows.Err(); err != nil {
+		slog.Error("Error iterating cluster photos", "error", err)
 		http.Error(w, "Could not read cluster photos", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=30")
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(photos); err != nil {
+		slog.Error("Failed to encode cluster photos", "error", err)
 		http.Error(w, "Could not encode cluster photos", http.StatusInternalServerError)
 	}
 }
@@ -1020,6 +1073,7 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 func (s *Server) collectionsPage(w http.ResponseWriter, r *http.Request) {
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -1046,11 +1100,13 @@ func (s *Server) collection(w http.ResponseWriter, r *http.Request) {
 	}
 	photos, err := s.photosForCollection(r.Context(), id)
 	if err != nil {
+		slog.Error("Failed to load gallery photos", "gallery_id", id, "error", err)
 		http.Error(w, "Could not load gallery", http.StatusInternalServerError)
 		return
 	}
 	galleries, err := s.collections(r.Context())
 	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
@@ -1061,11 +1117,13 @@ func (s *Server) collection(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
+		slog.Error("No photo IDs provided for gallery addition")
 		http.Error(w, "Select at least one photo", http.StatusBadRequest)
 		return
 	}
 	galleryID, err := s.selectGallery(r.Context(), r.FormValue("gallery_id"), r.FormValue("name"))
 	if err != nil {
+		slog.Error("Failed to select or create gallery", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1073,10 +1131,12 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 		SELECT $1, id FROM photos WHERE id = ANY(string_to_array($2, ',')::bigint[])
 		ON CONFLICT DO NOTHING`, galleryID, ids)
 	if err != nil {
+		slog.Error("Failed to add photos to gallery", "gallery_id", galleryID, "error", err)
 		http.Error(w, "Could not add photos to gallery", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
+		slog.Error("No selected photos could be added to the gallery", "gallery_id", galleryID)
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
 	}
@@ -1117,6 +1177,7 @@ func (s *Server) selectGallery(ctx context.Context, existingID, name string) (in
 // index triggers an incremental photo indexing HTTP endpoint request.
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if !s.startIndexing(s.indexPhotos) {
+		slog.Error("Indexing request rejected because another indexing operation is already in progress")
 		http.Error(w, "Indexing is already in progress", http.StatusConflict)
 		return
 	}
@@ -1126,6 +1187,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 // reindex triggers a complete photo re-index HTTP endpoint request.
 func (s *Server) reindex(w http.ResponseWriter, r *http.Request) {
 	if !s.startIndexing(s.reindexPhotos) {
+		slog.Error("Reindexing request rejected because another indexing operation is already in progress")
 		http.Error(w, "Indexing is already in progress", http.StatusConflict)
 		return
 	}
@@ -1150,6 +1212,7 @@ func (s *Server) stopIndexing(w http.ResponseWriter, _ *http.Request) {
 	s.indexProgressMu.Lock()
 	defer s.indexProgressMu.Unlock()
 	if s.indexCancel == nil {
+		slog.Error("Stop indexing request rejected because no indexing operation is currently in progress")
 		http.Error(w, "No indexing is in progress", http.StatusConflict)
 		return
 	}
@@ -1246,13 +1309,16 @@ func (s *Server) rawFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fullPath := filepath.Join(s.config.PhotoRoot, rawPath)
+
 	root, err := filepath.Abs(s.config.PhotoRoot)
 	if err != nil {
+		slog.Error("Could not resolve photo directory: ", "err", err)
 		http.Error(w, "Could not resolve photo directory", http.StatusInternalServerError)
 		return
 	}
 	fullPath, err = filepath.Abs(fullPath)
 	if err != nil {
+		slog.Error("Could not resolve raw file: ", "err", err)
 		http.Error(w, "Could not resolve raw file", http.StatusInternalServerError)
 		return
 	}
@@ -1291,12 +1357,14 @@ func (s *Server) thumbnailFile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
+		slog.Error("Download request rejected because no photo IDs were provided")
 		http.Error(w, "Select at least one photo", http.StatusBadRequest)
 		return
 	}
 	includeRaw := r.FormValue("raw") == "true"
 	rows, err := s.pool.Query(r.Context(), "SELECT path, COALESCE(raw_path, '') FROM photos WHERE id = ANY(string_to_array($1, ',')::bigint[])", ids)
 	if err != nil {
+slog.Error("Download request rejected because of database query error: ", "err", err)
 		http.Error(w, "Invalid selection", http.StatusBadRequest)
 		return
 	}
@@ -1311,6 +1379,7 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.addDownloadFiles(archive, path, rawPath, includeRaw); err != nil {
+			slog.Error("Download request failed while adding files to archive: ", "err", err)
 			http.Error(w, "Could not create download", http.StatusInternalServerError)
 			return
 		}
@@ -1469,10 +1538,12 @@ func (s *Server) render(w http.ResponseWriter, name string, data PageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	page, ok := s.templates[name]
 	if !ok {
+		slog.Error("template not found", "name", name)
 		http.Error(w, "Unknown page", http.StatusInternalServerError)
 		return
 	}
 	if err := page.ExecuteTemplate(w, name, data); err != nil {
+		slog.Error("template execution failed", "name", name, "error", err)
 		http.Error(w, "Could not render page", http.StatusInternalServerError)
 	}
 }
