@@ -1,5 +1,15 @@
 {{define "selected"}}{{template "base" .}}{{end}}
 {{define "content"}}
+<aside>
+  <h2>Selected Photos</h2>
+  <div>
+          <button type="button" id="add-to-collection-action">Add to collection</button>
+          <button type="button" hx-get="/download?raw=true" hx-swap="download">Download with raw files</button>
+          <button type="button" hx-get="/download?raw=false" hx-swap="download">Download without raw files</button>
+          <button type="button" hx-get="/csv" hx-swap="download">Export CSV</button>
+          <button type="button" hx-get="/clear-selected" hx-swap="none" id="clear-selection">Clear selection</button>
+    </div>
+</aside>
 <section id="gallery">
   {{template "gallery-content" .}}
 </section>

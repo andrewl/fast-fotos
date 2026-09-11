@@ -94,7 +94,7 @@ Displays your photos by
 - location (on a vmap)
 
 View as thumbnails, lists, full screen
-
+ 
 Features
 - view photo metadata
 - select one or more images
@@ -106,8 +106,10 @@ go test -v ./...
 npm run test:e2e
 
 TODO
-- Needs work on selected photos - better gallery, action buttons moved from the menu
 - Beef up tests - take screenshot on failed tests
-- This Week page? All items taken this week
-- Check urls
-- Export selection to csv
+- This Week page? All items taken this week. day of week -3 days,+4 days (bear in mind wrap around)
+- Indexing feedback
+- Camera name
+- Export collection to csv
+- delete the current collection
+- support for videos!

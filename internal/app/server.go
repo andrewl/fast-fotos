@@ -165,12 +165,14 @@ type mapPoint struct {
 func NewServer(ctx context.Context, config Config) (*Server, error) {
 	pool, err := pgxpool.New(ctx, config.DatabaseURL)
 	if err != nil {
+		slog.Error("connect to database", "error", err)
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 	server := &Server{config: config, pool: pool}
 	if config.GeoNamesDir != "" {
 		server.geocoder, err = geocode.LoadGeoNamesProvider(config.GeoNamesDir)
 		if err != nil {
+			slog.Error("load GeoNames data", "error", err)
 			pool.Close()
 			return nil, fmt.Errorf("load GeoNames data: %w", err)
 		}
@@ -178,16 +180,19 @@ func NewServer(ctx context.Context, config Config) (*Server, error) {
 	if config.ObjectModelDir != "" {
 		server.detector, err = objects.LoadONNXDetector(config.ObjectModelDir)
 		if err != nil {
+			slog.Error("load object detector", "error", err)
 			pool.Close()
 			return nil, fmt.Errorf("load object detector: %w", err)
 		}
 	}
 	if err := server.migrate(ctx); err != nil {
+		slog.Error("run database migrations", "error", err)
 		pool.Close()
 		return nil, err
 	}
 	server.templates, err = parseTemplates()
 	if err != nil {
+		slog.Error("parse templates", "error", err)
 		pool.Close()
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
@@ -211,18 +216,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /image/", s.image)
 	mux.HandleFunc("GET /search", s.search)
 	mux.HandleFunc("GET /search/", s.search)
-	mux.HandleFunc("GET /selected", s.selected)
-	mux.HandleFunc("GET /selection", s.selection)
-	mux.HandleFunc("POST /selection", s.updateSelection)
-	mux.HandleFunc("POST /clear-selection", s.clearSelection)
 	mux.HandleFunc("GET /maintenance", s.maintenance)
 	mux.HandleFunc("GET /months/", s.month)
 	mux.HandleFunc("GET /locations", s.locations)
 	mux.HandleFunc("GET /cluster", s.cluster)
 	mux.HandleFunc("GET /api/map-points", s.mapPoints)
 	mux.HandleFunc("GET /api/map-cluster", s.mapCluster)
-	mux.HandleFunc("GET /collections", s.collectionsPage)
-	mux.HandleFunc("GET /collection/", s.collection)
+	mux.HandleFunc("GET /collections", s.allCollectionsPage)
+	mux.HandleFunc("GET /collection/", s.collectionPage)
 	mux.HandleFunc("POST /collections", s.addToCollection)
 	mux.HandleFunc("POST /index", s.index)
 	mux.HandleFunc("POST /reindex", s.reindex)
@@ -231,7 +232,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /thumbnails/", s.thumbnailFile)
 	mux.HandleFunc("GET /photos/", s.photoFile)
 	mux.HandleFunc("GET /raw/", s.rawFile)
-	mux.HandleFunc("POST /download", s.download)
+	mux.HandleFunc("GET /download/", s.download)
 	return mux
 }
 
@@ -239,6 +240,7 @@ func (s *Server) Routes() http.Handler {
 func mustSub(files embed.FS, directory string) fs.FS {
 	sub, err := fs.Sub(files, directory)
 	if err != nil {
+		slog.Error("create sub filesystem", "error", err)
 		panic(err)
 	}
 	return sub
@@ -267,11 +269,6 @@ func (s *Server) migrate(ctx context.Context) error {
 			dominant_colors TEXT[] NOT NULL DEFAULT '{}',
 			indexed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
-		CREATE TABLE IF NOT EXISTS selection_photos (
-			session_token TEXT NOT NULL,
-			photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-			PRIMARY KEY (session_token, photo_id)
-		);
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail BYTEA;
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS raw_path TEXT;
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS location TEXT;
@@ -294,14 +291,15 @@ func (s *Server) migrate(ctx context.Context) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
 		CREATE TABLE IF NOT EXISTS collection_photos (
-			gallery_id BIGINT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+			collection_id BIGINT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
 			photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-			PRIMARY KEY (gallery_id, photo_id)
+			PRIMARY KEY (collection_id, photo_id)
 		);
 		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
 		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
 			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;`)
 	if err != nil {
+		slog.Error("migrate database", "error", err)
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	return nil
@@ -325,6 +323,7 @@ func (s *Server) recordIndexedAt(ctx context.Context, indexedAt time.Time) error
 	_, err := s.pool.Exec(ctx, `INSERT INTO index_state (id, last_indexed_at) VALUES (TRUE, $1)
 		ON CONFLICT (id) DO UPDATE SET last_indexed_at = EXCLUDED.last_indexed_at`, indexedAt)
 	if err != nil {
+		slog.Error("record indexed time", "error", err)
 		return fmt.Errorf("record indexed time: %w", err)
 	}
 	return nil
@@ -394,11 +393,13 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/image/"), 10, 64)
 	if err != nil || id < 1 {
+		slog.Error("Invalid photo ID", "id", r.URL.Path, "error", err)
 		http.NotFound(w, r)
 		return
 	}
 	photo, err := s.photoByID(r.Context(), id)
 	if err != nil {
+		slog.Error("Failed to load photo", "id", id, "error", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -406,8 +407,9 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 	if from == "" {
 		from = timelinePath(photo.TakenAt.Format("2006-01"))
 	}
-	returnURL, collectionName, collection, err := s.imageCollection(r.Context(), from, s.selectionToken(w, r))
+	returnURL, collectionName, collection, err := s.imageGalleryContextPhotos(r.Context(), from, s.selectionToken(w, r))
 	if err != nil {
+		slog.Error("Failed to load image collection", "from", from, "error", err)
 		http.NotFound(w, r)
 		return
 	}
@@ -428,12 +430,14 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		criteria := strings.TrimPrefix(r.URL.Path, "/search/")
 		decoded, err := url.PathUnescape(criteria)
 		if err != nil {
+			slog.Error("Failed to decode search criteria", "criteria", criteria, "error", err)
 			http.NotFound(w, r)
 			return
 		}
 
 		query, err = url.ParseQuery(decoded)
 		if err != nil {
+			slog.Error("Failed to parse search criteria", "criteria", decoded, "error", err)
 			http.NotFound(w, r)
 			return
 		}
@@ -475,12 +479,21 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid flash filter", http.StatusBadRequest)
 		return
 	}
-	photos, err := s.searchPhotos(r.Context(), search)
-	if err != nil {
-		slog.Error("Failed to search photos", "error", err)
-		http.Error(w, "Could not search photos", http.StatusInternalServerError)
-		return
+
+	photos := []Photo{}
+	//we must have at lease one search criteria to avoid returning the entire photo library
+	if search.DateFrom == "" && search.DateTo == "" && search.Label == "" && search.CameraModel == "" && search.FocalLength == "" && search.Flash == "" && search.Location == "" && search.Color == "" {
+		slog.Info("No search criteria provided")
+	} else {
+		var err error
+		photos, err = s.searchPhotos(r.Context(), search)
+		if err != nil {
+			slog.Error("Failed to search photos", "error", err)
+			http.Error(w, "Could not search photos", http.StatusInternalServerError)
+			return
+		}
 	}
+	var err error
 	if search.CameraModels, err = s.distinctValues(r.Context(), `SELECT DISTINCT camera_model FROM photos WHERE camera_model IS NOT NULL AND camera_model <> '' ORDER BY camera_model`); err != nil {
 		slog.Error("Failed to load camera models", "error", err)
 		http.Error(w, "Could not load camera models", http.StatusInternalServerError)
@@ -516,68 +529,6 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "search", PageData{Page: "search", Photos: photos, Collections: galleries, Search: search, ReturnURL: r.URL.RequestURI()})
 }
 
-// selected renders the view displaying all currently selected photos for the user's session.
-func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
-	photos, err := s.selectedPhotos(r.Context(), s.selectionToken(w, r))
-	if err != nil {
-		slog.Error("Failed to load selected photos", "error", err)
-		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
-		return
-	}
-	galleries, err := s.collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
-		return
-	}
-	s.render(w, "selected", PageData{Page: "selected", Photos: photos, Collections: galleries, ReturnURL: "/selected"})
-}
-
-// selection responds with a JSON array of photo IDs selected in the current session.
-func (s *Server) selection(w http.ResponseWriter, r *http.Request) {
-	ids, err := s.selectionIDs(r.Context(), s.selectionToken(w, r))
-	if err != nil {
-		slog.Error("Failed to load selection", "error", err)
-		http.Error(w, "Could not load selection", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ids)
-}
-
-// updateSelection adds or removes a photo ID from the session's selection set.
-func (s *Server) updateSelection(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
-	if err != nil || id < 1 {
-		slog.Error("Invalid photo ID", "id", r.FormValue("id"), "error", err)
-		http.Error(w, "Invalid photo ID", http.StatusBadRequest)
-		return
-	}
-	token := s.selectionToken(w, r)
-	if r.FormValue("selected") == "true" {
-		_, err = s.pool.Exec(r.Context(), `INSERT INTO selection_photos (session_token, photo_id)
-			SELECT $1, id FROM photos WHERE id = $2 ON CONFLICT DO NOTHING`, token, id)
-	} else {
-		_, err = s.pool.Exec(r.Context(), `DELETE FROM selection_photos WHERE session_token = $1 AND photo_id = $2`, token, id)
-	}
-	if err != nil {
-		slog.Error("Failed to update selection", "error", err)
-		http.Error(w, "Could not update selection", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// clearSelection removes all selected photos for the current session token.
-func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.pool.Exec(r.Context(), `DELETE FROM selection_photos WHERE session_token = $1`, s.selectionToken(w, r)); err != nil {
-		slog.Error("Failed to clear selection", "error", err)
-		http.Error(w, "Could not clear selection", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // selectionToken reads or sets an HTTP-only session cookie for managing photo selections.
 func (s *Server) selectionToken(w http.ResponseWriter, r *http.Request) string {
 	const cookieName = "fast-fotos-selection"
@@ -595,56 +546,29 @@ func (s *Server) selectionToken(w http.ResponseWriter, r *http.Request) string {
 	return token
 }
 
-// selectionIDs queries the list of photo IDs selected for a session token.
-func (s *Server) selectionIDs(ctx context.Context, token string) ([]int64, error) {
-	rows, err := s.pool.Query(ctx, `SELECT photo_id FROM selection_photos WHERE session_token = $1 ORDER BY photo_id`, token)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-// selectedPhotos returns all Photo records selected for a session token.
-func (s *Server) selectedPhotos(ctx context.Context, token string) ([]Photo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''),
-		p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors
-		FROM photos p JOIN selection_photos sp ON sp.photo_id = p.id
-		WHERE sp.session_token = $1 ORDER BY p.taken_at ASC`, token)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectPhotos(rows)
-}
-
-// imageCollection loads context photos and display labels for navigating between photos in a collection.
-func (s *Server) imageCollection(ctx context.Context, from, selectionToken string) (string, string, []Photo, error) {
+// imageGalleryContextPhotos loads context photos and display labels for navigating between photos in a gallery.
+func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionToken string) (string, string, []Photo, error) {
 	if from == "" {
+		slog.Info("No gallery URL provided, defaulting to timeline")
 		return "/", "Timeline", nil, nil
 	}
-	collectionURL, err := url.Parse(from)
-	if err != nil || collectionURL.IsAbs() || collectionURL.Host != "" {
+	galleryURL, err := url.Parse(from)
+	if err != nil || galleryURL.IsAbs() || galleryURL.Host != "" {
+		slog.Error("Invalid collection URL", "url", from, "error", err)
 		return "", "", nil, errors.New("invalid collection URL")
 	}
 	switch {
-	case collectionURL.Path == "/":
+	case galleryURL.Path == "/":
+		slog.Info("Loading timeline", "query", galleryURL.Query())
 		months, err := s.months(ctx)
 		if err != nil || len(months) == 0 {
 			return "/", "Timeline", nil, err
 		}
 		photos, err := s.photosForMonth(ctx, months[0].Key)
 		return "/", monthLabel(months[0].Key), photos, err
-	case strings.HasPrefix(collectionURL.Path, "/timeline/"):
-		month := strings.TrimPrefix(collectionURL.Path, "/timeline/")
+	case strings.HasPrefix(galleryURL.Path, "/timeline/"):
+		slog.Info("Loading timeline month", "month", galleryURL.Path)
+		month := strings.TrimPrefix(galleryURL.Path, "/timeline/")
 		if len(month) == 7 && month[4] == '/' {
 			month = month[:4] + "-" + month[5:]
 		}
@@ -652,26 +576,30 @@ func (s *Server) imageCollection(ctx context.Context, from, selectionToken strin
 			return "", "", nil, errors.New("invalid timeline month")
 		}
 		photos, err := s.photosForMonth(ctx, month)
-		return collectionURL.RequestURI(), monthLabel(month), photos, err
-	case collectionURL.Path == "/selected":
-		photos, err := s.selectedPhotos(ctx, selectionToken)
-		return "/selected", "Selected photos", photos, err
-	case collectionURL.Path == "/cluster":
-		photos, err := s.clusterPhotos(ctx, collectionURL.Query())
-		return collectionURL.RequestURI(), "Map cluster", photos, err
-	case strings.HasPrefix(collectionURL.Path, "/collections/"):
-		galleryID, err := strconv.ParseInt(strings.TrimPrefix(collectionURL.Path, "/collections/"), 10, 64)
-		if err != nil || galleryID < 1 {
-			return "", "", nil, errors.New("invalid gallery")
+		return galleryURL.RequestURI(), monthLabel(month), photos, err
+	case galleryURL.Path == "/cluster":
+		slog.Info("Loading map cluster", "query", galleryURL.Query())
+		photos, err := s.clusterPhotos(ctx, galleryURL.Query())
+		return galleryURL.RequestURI(), "Map cluster", photos, err
+	case strings.HasPrefix(galleryURL.Path, "/collections/"):
+		slog.Info("Loading collection", "collectionId", galleryURL.Path)
+		collectionID, err := strconv.ParseInt(strings.TrimPrefix(galleryURL.Path, "/collections/"), 10, 64)
+		if err != nil || collectionID < 1 {
+			slog.Error("Invalid collection ID", "collectionId", galleryURL.Path, "error", err)
+			return "", "", nil, errors.New("invalid collection")
 		}
-		photos, err := s.photosForCollection(ctx, galleryID)
+		photos, err := s.photosForCollection(ctx, collectionID)
 		var name string
-		err = s.pool.QueryRow(ctx, `SELECT name from collections WHERE id = $1`, galleryID).Scan(&name)
-		return collectionURL.Path, name, photos, err
-	case collectionURL.Path == "/search" || strings.HasPrefix(collectionURL.Path, "/search/"):
-		query := collectionURL.Query()
-		if strings.HasPrefix(collectionURL.Path, "/search/") {
-			criteria := strings.TrimPrefix(collectionURL.Path, "/search/")
+		err = s.pool.QueryRow(ctx, `SELECT name from collections WHERE id = $1`, collectionID).Scan(&name)
+		if err != nil {
+			slog.Error("Failed to load collection name", "collectionId", collectionID, "error", err)
+		}
+		return galleryURL.Path, name, photos, err
+	case galleryURL.Path == "/search" || strings.HasPrefix(galleryURL.Path, "/search/"):
+		slog.Info("Loading search results", "query", galleryURL.Query())
+		query := galleryURL.Query()
+		if strings.HasPrefix(galleryURL.Path, "/search/") {
+			criteria := strings.TrimPrefix(galleryURL.Path, "/search/")
 			decoded, err := url.PathUnescape(criteria)
 			if err != nil {
 				return "", "", nil, err
@@ -694,8 +622,9 @@ func (s *Server) imageCollection(ctx context.Context, from, selectionToken strin
 			return "", "", nil, errors.New("invalid location filter")
 		}
 		photos, err := s.searchPhotos(ctx, search)
-		return collectionURL.RequestURI(), "Search results", photos, err
+		return galleryURL.RequestURI(), "Search results", photos, err
 	default:
+		slog.Error("Unsupported collection URL", "url", galleryURL.Path)
 		return "", "", nil, errors.New("unsupported collection URL")
 	}
 }
@@ -756,7 +685,7 @@ func (s *Server) searchLocations(ctx context.Context) ([]SearchLocation, error) 
 		UNION
 		SELECT DISTINCT 'region:' || region, region, concat_ws(', ', region, country), '', region
 		FROM photos WHERE region IS NOT NULL AND region <> ''
-		ORDER BY 3`)
+	ORDER BY 3`)
 	if err != nil {
 		return nil, err
 	}
@@ -779,14 +708,14 @@ func (s *Server) searchPhotos(ctx context.Context, search SearchData) ([]Photo, 
 		camera_model, focal_length, flash_fired, objects, dominant_colors
 		FROM photos
 		WHERE ($1 = '' OR taken_at >= $1::date)
-			AND ($2 = '' OR taken_at < ($2::date + INTERVAL '1 day'))
-			AND ($3 = '' OR $3 = ANY(objects))
-			AND ($4 = '' OR camera_model = $4)
-			AND ($5 = '' OR focal_length = NULLIF($5, '')::double precision)
-			AND ($6 = '' OR ($6 = 'yes' AND flash_fired = TRUE) OR ($6 = 'no' AND flash_fired = FALSE))
-			AND ($7 = '' OR settlement = $7)
-			AND ($8 = '' OR region = $8)
-			AND ($9 = '' OR $9 = ANY(dominant_colors))
+		AND ($2 = '' OR taken_at < ($2::date + INTERVAL '1 day'))
+		AND ($3 = '' OR $3 = ANY(objects))
+		AND ($4 = '' OR camera_model = $4)
+		AND ($5 = '' OR focal_length = NULLIF($5, '')::double precision)
+		AND ($6 = '' OR ($6 = 'yes' AND flash_fired = TRUE) OR ($6 = 'no' AND flash_fired = FALSE))
+		AND ($7 = '' OR settlement = $7)
+		AND ($8 = '' OR region = $8)
+		AND ($9 = '' OR $9 = ANY(dominant_colors))
 		ORDER BY taken_at ASC, id ASC`,
 		search.DateFrom, search.DateTo, search.Label, search.CameraModel,
 		search.FocalLength, search.Flash, search.Settlement, search.Region, search.Color)
@@ -861,7 +790,7 @@ func (s *Server) locationGroups(ctx context.Context) ([]LocationGroup, error) {
 		UNION ALL
 		SELECT 'region', region, COUNT(*)::int FROM photos
 		WHERE region IS NOT NULL AND region <> '' GROUP BY region
-		ORDER BY 2`)
+	ORDER BY 2`)
 	if err != nil {
 		return nil, err
 	}
@@ -882,7 +811,7 @@ func (s *Server) locationBounds(ctx context.Context, settlement, region string) 
 	var bounds MapBounds
 	err := s.pool.QueryRow(ctx, `SELECT MIN(latitude), MIN(longitude), MAX(latitude), MAX(longitude)
 		FROM photos WHERE ($1 = '' OR settlement = $1) AND ($2 = '' OR region = $2)
-			AND latitude IS NOT NULL AND longitude IS NOT NULL`, settlement, region).
+		AND latitude IS NOT NULL AND longitude IS NOT NULL`, settlement, region).
 		Scan(&bounds.MinLatitude, &bounds.MinLongitude, &bounds.MaxLatitude, &bounds.MaxLongitude)
 	if err != nil {
 		return nil, err
@@ -919,7 +848,7 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 	}
 	zoom, err := strconv.Atoi(query.Get("zoom"))
 	if err != nil || zoom < 0 || zoom > 22 || minLatitude < -90 || maxLatitude > 90 ||
-		minLongitude < -180 || maxLongitude > 180 || minLatitude >= maxLatitude || minLongitude >= maxLongitude {
+	minLongitude < -180 || maxLongitude > 180 || minLatitude >= maxLatitude || minLongitude >= maxLongitude {
 
 		slog.Error("Invalid map bounds or zoom level", "minLat", minLatitude, "maxLat", maxLatitude,
 			"minLng", minLongitude, "maxLng", maxLongitude, "zoom", zoom, "error", err)
@@ -933,7 +862,7 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 		MIN(latitude), MIN(longitude), MAX(latitude), MAX(longitude)
 		FROM photos
 		WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
-			AND ($6 = '' OR settlement = $6) AND ($7 = '' OR region = $7)
+		AND ($6 = '' OR settlement = $6) AND ($7 = '' OR region = $7)
 		GROUP BY floor((latitude + 90) / $5::double precision), floor((longitude + 180) / $5::double precision)
 		ORDER BY MIN(id) LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude, cellSize, settlement, region)
 	if err != nil {
@@ -1071,47 +1000,50 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 }
 
 // galleriesPage renders the custom galleries list page or redirects to the first gallery.
-func (s *Server) collectionsPage(w http.ResponseWriter, r *http.Request) {
-	galleries, err := s.collections(r.Context())
+func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
+	collections, err := s.collections(r.Context())
 	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		slog.Error("Failed to load collections", "error", err)
+		http.Error(w, "Could not load collections", http.StatusInternalServerError)
 		return
 	}
-	if len(galleries) > 0 {
-		http.Redirect(w, r, fmt.Sprintf("/collections/%d", galleries[0].ID), http.StatusSeeOther)
+	if len(collections) > 0 {
+		slog.Info("Redirecting to first collection", "collectionID", collections[0].ID)
+		http.Redirect(w, r, fmt.Sprintf("/collection/%d", collections[0].ID), http.StatusSeeOther)
 		return
 	}
-	s.render(w, "galleries", PageData{Collections: galleries})
+	s.render(w, "collections", PageData{Collections: collections})
 }
 
-// gallery renders the detail grid page for a custom user gallery.
-func (s *Server) collection(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/collections/"), 10, 64)
+// gallery renders the detail grid page for a collection
+func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/collection/"), 10, 64)
 	if err != nil || id < 1 {
+		slog.Error("Invalid collection ID", "error", err)
 		http.NotFound(w, r)
 		return
 	}
 	var collection Collection 
 	if err := s.pool.QueryRow(r.Context(), `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		from collections g LEFT JOIN collection_photos gp ON gp.gallery_id = g.id
+		from collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
 		WHERE g.id = $1 GROUP BY g.id`, id).Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
+		slog.Error("Failed to load collection", "collection_id", id, "error", err)
 		http.NotFound(w, r)
 		return
 	}
 	photos, err := s.photosForCollection(r.Context(), id)
 	if err != nil {
-		slog.Error("Failed to load gallery photos", "gallery_id", id, "error", err)
-		http.Error(w, "Could not load gallery", http.StatusInternalServerError)
+		slog.Error("Failed to load collection photos", "collection_id", id, "error", err)
+		http.Error(w, "Could not load collection", http.StatusInternalServerError)
 		return
 	}
-	galleries, err := s.collections(r.Context())
+	collections, err := s.collections(r.Context())
 	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		slog.Error("Failed to load collections", "error", err)
+		http.Error(w, "Could not load collections", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "collection", PageData{Collections: galleries, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
+	s.render(w, "collection", PageData{Collections: collections, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
 }
 
 // addToCollection adds selected photo IDs to an existing or newly created custom gallery.
@@ -1122,22 +1054,22 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Select at least one photo", http.StatusBadRequest)
 		return
 	}
-	galleryID, err := s.selectGallery(r.Context(), r.FormValue("gallery_id"), r.FormValue("name"))
+	galleryID, err := s.selectCollection(r.Context(), r.FormValue("collection_id"), r.FormValue("name"))
 	if err != nil {
 		slog.Error("Failed to select or create gallery", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	tag, err := s.pool.Exec(r.Context(), `INSERT INTO collection_photos (gallery_id, photo_id)
+	tag, err := s.pool.Exec(r.Context(), `INSERT INTO collection_photos (collection_id, photo_id)
 		SELECT $1, id FROM photos WHERE id = ANY(string_to_array($2, ',')::bigint[])
 		ON CONFLICT DO NOTHING`, galleryID, ids)
 	if err != nil {
-		slog.Error("Failed to add photos to gallery", "gallery_id", galleryID, "error", err)
+		slog.Error("Failed to add photos to gallery", "collection_id", galleryID, "error", err)
 		http.Error(w, "Could not add photos to gallery", http.StatusInternalServerError)
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		slog.Error("No selected photos could be added to the gallery", "gallery_id", galleryID)
+		slog.Error("No selected photos could be added to the gallery", "collection_id", galleryID)
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
 	}
@@ -1145,32 +1077,32 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// selectGallery validates an existing gallery ID or creates a new named gallery record.
-func (s *Server) selectGallery(ctx context.Context, existingID, name string) (int64, error) {
+// selectCollection validates an existing gallery ID or creates a new named gallery record.
+func (s *Server) selectCollection(ctx context.Context, existingID, name string) (int64, error) {
 	if existingID != "" {
 		id, err := strconv.ParseInt(existingID, 10, 64)
 		if err != nil || id < 1 {
-			return 0, fmt.Errorf("invalid gallery")
+			return 0, fmt.Errorf("invalid collection")
 		}
 		var found bool
 		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 from collections WHERE id = $1)", id).Scan(&found); err != nil {
-			return 0, fmt.Errorf("look up gallery: %w", err)
+			return 0, fmt.Errorf("look up collections: %w", err)
 		}
 		if !found {
-			return 0, fmt.Errorf("gallery does not exist")
+			return 0, fmt.Errorf("collection does not exist")
 		}
 		return id, nil
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return 0, fmt.Errorf("enter a new gallery name or choose an existing gallery")
+		return 0, fmt.Errorf("enter a new collection name or choose an existing collection")
 	}
 	if len(name) > 200 {
-		return 0, fmt.Errorf("gallery name must be 200 characters or fewer")
+		return 0, fmt.Errorf("collection name must be 200 characters or fewer")
 	}
 	var id int64
-	if err := s.pool.QueryRow(ctx, "INSERT INTO galleries (name) VALUES ($1) RETURNING id", name).Scan(&id); err != nil {
-		return 0, fmt.Errorf("create gallery: %w", err)
+	if err := s.pool.QueryRow(ctx, "INSERT INTO collections (name) VALUES ($1) RETURNING id", name).Scan(&id); err != nil {
+		return 0, fmt.Errorf("create collection: %w", err)
 	}
 	return id, nil
 }
@@ -1354,24 +1286,49 @@ func (s *Server) thumbnailFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, path+".jpg", time.Time{}, bytes.NewReader(thumbnail))
 }
 
-// download streams a zip archive containing selected photos and optional raw files.
+
+
+// download streams a zip archive containing photos from a specific collection and optional raw files.
+// the photo ids are passed in the query string as a comma-separated list, e.g., /download/abc123?ids=1,2,3
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {
-	ids := r.FormValue("ids")
-	if ids == "" {
-		slog.Error("Download request rejected because no photo IDs were provided")
-		http.Error(w, "Select at least one photo", http.StatusBadRequest)
+
+	//get the ids from the ids query parameter, e.g., /download/abc123?ids=1,2,3 would have ids "1,2,3"
+	//and confirm each entry is an integer, otherwise return a 400 error
+	photoIDs := strings.Split(r.URL.Query().Get("ids"), ",")
+
+	if len(photoIDs) == 0 {
+		slog.Error("Download request rejected because no photo ids were provided","ids", r.URL.Query().Get("ids"))
+		http.Error(w, "No photo ids provided", http.StatusBadRequest)
 		return
 	}
-	includeRaw := r.FormValue("raw") == "true"
-	rows, err := s.pool.Query(r.Context(), "SELECT path, COALESCE(raw_path, '') FROM photos WHERE id = ANY(string_to_array($1, ',')::bigint[])", ids)
+
+	for _, id := range photoIDs {
+		if _, err := strconv.Atoi(id); err != nil {
+			slog.Error("Download request rejected because of invalid photo id: ", "id", id, "err", err)
+			http.Error(w, "Invalid photo id: "+id, http.StatusBadRequest)
+			return
+		}
+	}
+
+
+	//if the query string contains raw=true, include the raw files in the zip archive
+	includeRaw := r.URL.Query().Get("raw") == "true"
+
+	//get the path and rawpath of all the photos in the collection
+	rows, err := s.pool.Query(r.Context(), "SELECT path, COALESCE(raw_path, '') FROM photos where id = ANY($1)", photoIDs)
+
 	if err != nil {
-slog.Error("Download request rejected because of database query error: ", "err", err)
+		slog.Error("Download request rejected because of database query error: ", "err", err)
 		http.Error(w, "Invalid selection", http.StatusBadRequest)
 		return
 	}
 	defer rows.Close()
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="fast-fotos-selection.zip"`)
+
+	//create a filename with the date-time of the request, e.g., fast-fotos-selection-2023-08-15-150405.zip
+	filename := fmt.Sprintf("fast-fotos-selection-%s.zip", time.Now().Format("2006-01-02-150405"))
+
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	archive := zip.NewWriter(w)
 	defer archive.Close()
 	for rows.Next() {
@@ -1467,9 +1424,10 @@ func (s *Server) photosForMonth(ctx context.Context, month string) ([]Photo, err
 // galleries queries all user-created galleries and their photo counts.
 func (s *Server) collections(ctx context.Context) ([]Collection, error) {
 	rows, err := s.pool.Query(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		from collections g LEFT JOIN collection_photos gp ON gp.gallery_id = g.id
+		from collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
 		GROUP BY g.id ORDER BY g.name ASC`)
 	if err != nil {
+		slog.Error("Error querying collections: ", "err", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -1487,8 +1445,9 @@ func (s *Server) collections(ctx context.Context) ([]Collection, error) {
 // photosForCollection queries all photos assigned to a specific custom gallery ID.
 func (s *Server) photosForCollection(ctx context.Context, galleryID int64) ([]Photo, error) {
 	rows, err := s.pool.Query(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors FROM photos p
-		JOIN collection_photos gp ON gp.photo_id = p.id WHERE gp.gallery_id = $1 ORDER BY p.taken_at ASC`, galleryID)
+		JOIN collection_photos gp ON gp.photo_id = p.id WHERE gp.collection_id = $1 ORDER BY p.taken_at ASC`, galleryID)
 	if err != nil {
+		slog.Error("Error querying photos for collection: ", "err", err)
 		return nil, err
 	}
 
@@ -1501,12 +1460,14 @@ func (s *Server) photoByID(ctx context.Context, id int64) (Photo, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors
 		FROM photos WHERE id = $1`, id)
 	if err != nil {
+		slog.Error("Error querying photo by ID: ", "err", err)
 		return Photo{}, err
 	}
 	defer rows.Close()
 	photos, err := collectPhotos(rows)
 	if err != nil || len(photos) != 1 {
 		if err != nil {
+			slog.Error("Error collecting photo by ID: ", "err", err)
 			return Photo{}, err
 		}
 		return Photo{}, pgx.ErrNoRows
@@ -1527,6 +1488,7 @@ func collectPhotos(rows photoRows) ([]Photo, error) {
 	for rows.Next() {
 		var photo Photo
 		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors); err != nil {
+			slog.Error("Error scanning photo row: ", "err", err)
 			return nil, err
 		}
 		photos = append(photos, photo)
@@ -1564,19 +1526,19 @@ func parseTemplates() (map[string]*template.Template, error) {
 	pages := map[string][]string{
 		"home":           {"templates/base.html", "templates/home.html", "templates/gallery.html"},
 		"image":          {"templates/base.html", "templates/image.html", "templates/gallery.html"},
-		"selected":       {"templates/base.html", "templates/selected.html", "templates/gallery.html"},
 		"search":         {"templates/base.html", "templates/search.html", "templates/gallery.html"},
 		"maintenance":    {"templates/base.html", "templates/maintenance.html"},
 		"gallery":        {"templates/gallery.html"},
 		"locations":      {"templates/base.html", "templates/locations.html"},
 		"cluster":        {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
-		"galleries":      {"templates/base.html", "templates/galleries.html"},
+		"collections":    {"templates/base.html", "templates/collections.html"},
 		"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {
 		page, err := template.New(name).Funcs(funcs).ParseFS(templateFiles, files...)
 		if err != nil {
+			slog.Error("Error parsing template", "name", name, "error", err)
 			return nil, fmt.Errorf("parse %s template: %w", name, err)
 		}
 		templates[name] = page
@@ -1610,6 +1572,7 @@ func imagePath(id int64, returnURL string) string {
 func monthLabel(month string) string {
 	parsed, err := time.Parse("2006-01", month)
 	if err != nil {
+		slog.Error("Error parsing month string: ", "month", month, "err", err)
 		return month
 	}
 	return parsed.Format("January 2006")

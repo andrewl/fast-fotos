@@ -1,8 +1,24 @@
 {{define "gallery"}}{{template "gallery-content" .}}{{end}}
 {{define "gallery-content"}}
-<div class="gallery-head"><h1>{{if .Collection}}{{.Collection.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Recent photos{{end}}</h1>{{if or (eq .Page "search") (eq .Page "selected")}}<span class="search-result-count">{{len .Photos}} photos</span>{{end}}</div>
+<div class="gallery-head">
+  <h1>{{if .Collection}}{{.Collection.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Recent photos{{end}}</h1>
+  {{if eq .Page "search"}}
+  <span class="search-result-count">Matched {{len .Photos}} photos</span>{{end}}
+    <div class="header-actions">
+      <details class="action-menu">
+        <summary aria-label="Open selected menu"><span aria-hidden="true" class="material-symbols-outlined">check_box</span><span class="sr-only">Selected</span></summary>
+        <div class="action-menu-panel">
+          <button onClick="selectAll()"id="select-all">Select All</button>
+          <button onClick="selectNone()" id="unselect-all">Unselect All</button>
+          <button type="button" id="add-selection-to-collection" class="btn btn-light p-1" command="show-modal" commandfor="add-to-collection-dialog">Add Selected To Collection</button>
+          <button type="button" data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" id="download-with-raw" disabled>Download selected with raw files</button>
+          <button type="button" data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" id="download-without-raw" disabled>Download selected without raw files</button>
+        </div>
+      </details>
+    </div>
+</div>
 <div class="grid">
-{{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}" aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
+  {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}" aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
 {{else}}<p>{{if or (eq .Page "search") (eq .Page "selected")}}No photos found{{else}}No photos in this month.{{end}}</p>{{end}}
 </div>
 {{end}}

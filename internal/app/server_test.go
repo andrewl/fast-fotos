@@ -17,7 +17,7 @@ func TestParseTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse templates: %v", err)
 	}
-	for _, name := range []string{"home", "gallery", "locations", "galleries", "collection"} {
+	for _, name := range []string{"home", "gallery", "locations", "collections", "collection"} {
 		if templates[name] == nil {
 			t.Errorf("template %q was not created", name)
 		}

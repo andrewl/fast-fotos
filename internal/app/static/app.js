@@ -1,89 +1,54 @@
-let selectedIDs = new Set();
-
-function selectedPhotoIDs() {
-  return [...selectedIDs];
-}
-
-function updateSelectionControls() {
-  const ids = selectedPhotoIDs();
-  const downloadWithRaw = document.querySelector("#download-with-raw");
-  const downloadWithoutRaw = document.querySelector("#download-without-raw");
-  const addToGallery = document.querySelector("#add-to-gallery-action");
-  const clearSelection = document.querySelector("#clear-selection");
-  const selectionCount = document.querySelector("#selection-count");
-  if (!downloadWithRaw || !downloadWithoutRaw || !addToGallery || !clearSelection) return;
-  downloadWithRaw.disabled = ids.length === 0;
-  downloadWithoutRaw.disabled = ids.length === 0;
-  addToGallery.disabled = ids.length === 0;
-  clearSelection.disabled = ids.length === 0;
-  selectionCount.hidden = ids.length === 0;
-  selectionCount.textContent = ids.length;
-  const download = (includeRaw) => {
-    const form = document.createElement("form");
-    form.method = "post";
-    form.action = "/download";
-    const input = document.createElement("input");
-    input.name = "ids";
-    input.value = ids.join(",");
-    const rawInput = document.createElement("input");
-    rawInput.name = "raw";
-    rawInput.value = String(includeRaw);
-    form.append(input, rawInput);
-    document.body.append(form);
-    form.submit();
-    form.remove();
-  };
-  downloadWithRaw.onclick = () => download(true);
-  downloadWithoutRaw.onclick = () => download(false);
-  addToGallery.onclick = () => {
-    const dialog = document.querySelector("#add-to-gallery-dialog");
-    dialog.querySelector('input[name="ids"]').value = ids.join(",");
-    dialog.querySelector("#add-to-gallery-error").hidden = true;
-    dialog.showModal();
-  };
-  clearSelection.onclick = () => {
-    fetch("/clear-selection", {method: "POST"}).then((response) => {
-      if (!response.ok) throw new Error("Could not clear selection");
-      selectedIDs.clear();
-      syncSelectionCheckboxes();
-      updateSelectionControls();
-      updatePreviewSelection();
-    });
-  };
-}
-
-document.addEventListener("change", (event) => {
-  if (!event.target.matches("[data-photo-selection]")) return;
-  const id = event.target.value;
-  fetch("/selection", {
-    method: "POST",
-    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-    body: new URLSearchParams({id, selected: String(event.target.checked)})
-  }).then((response) => {
-    if (!response.ok) throw new Error("Could not update selection");
-    if (event.target.checked) selectedIDs.add(id);
-    else selectedIDs.delete(id);
-    updateSelectionControls();
-    updatePreviewSelection();
-  });
+document.body.addEventListener('htmx:configRequest', function(evt) {
+    //see https://htmx.org/events/#htmx:configRequest
+    console.log(evt);
 });
 
-function syncSelectionCheckboxes() {
-  document.querySelectorAll("[data-photo-selection]").forEach((input) => {
-    input.checked = selectedIDs.has(input.value);
-  });
+//this function updates the action-menu-panel - if there are no photos selected then
+//disable all of the menu buttons except for that with the id select-all, otherwise enable them all
+function updateActionMenu() {
+  const selectedCount = document.querySelectorAll("[data-photo-selection]:checked").length;
+  const actionMenu = document.querySelector(".action-menu-panel");
+  if (!actionMenu) return;
+  if (selectedCount === 0) {
+    actionMenu.querySelectorAll("button:not(#select-all)").forEach((button) => {
+      button.disabled = true;
+    });
+  } else {
+    actionMenu.querySelectorAll("button").forEach((button) => {
+      button.disabled = false;
+    });
+  }
 }
 
-fetch("/selection")
-  .then((response) => {
-    if (!response.ok) throw new Error("Could not load selection");
-    return response.json();
-  })
-  .then((ids) => {
-    selectedIDs = new Set(ids.map(String));
-    syncSelectionCheckboxes();
-    updateSelectionControls();
+
+function toggleOne(id) {
+  const input = document.querySelector(`[data-photo-selection][value="${id}"]`);
+  if (input) {
+    input.checked = !input.checked;
+  }
+  updateActionMenu();
+}
+
+function selectAll() {
+  //select all checkboxes with data-photo-selection attribute
+  document.querySelectorAll("[data-photo-selection]").forEach((input) => {
+    input.checked = true;
   });
+  updateActionMenu();
+}
+
+function selectNone() {
+  //deselect all checkboxes with data-photo-selection attribute
+  document.querySelectorAll("[data-photo-selection]").forEach((input) => {
+    input.checked = false;
+  });
+  updateActionMenu();
+}
+
+//when the document has loaded then update the action menu
+document.addEventListener("DOMContentLoaded", () => {
+ updateActionMenu();
+});
 
 document.addEventListener("click", (event) => {
   const month = event.target.closest(".month");
@@ -109,18 +74,19 @@ document.addEventListener("click", (event) => {
   document.querySelector("#add-to-gallery-dialog").close();
 });
 
+document.addEventListener("click", (event) => {
+  if (event.target.matches("#photo-viewer-back")) {
+    closePhotoViewer();
+  }
+});
+
+
 document.addEventListener("htmx:responseError", (event) => {
   if (!event.detail.elt.matches("#add-to-gallery-form")) return;
 
   const error = document.querySelector("#add-to-gallery-error");
   error.textContent = event.detail.xhr.responseText || "Could not add photos to the gallery";
   error.hidden = false;
-});
-
-document.addEventListener("click", (event) => {
-  if (event.target.matches("#photo-viewer-back")) {
-    closePhotoViewer();
-  }
 });
 
 function showPhotoPreview(trigger) {
@@ -180,6 +146,12 @@ document.addEventListener("keydown", (event) => {
       checkbox.dispatchEvent(new Event("change", {bubbles: true}));
     }
     return;
+  }
+  if (event.key === "a" || event.key === "A") {
+    selectAll();
+  }
+  if (event.key === "d" || event.key === "D") {
+    unselectAll();
   }
   const selector = event.key === "PageUp" || event.key === "ArrowLeft"
     ? "[data-image-previous]"
@@ -246,23 +218,6 @@ function closePhotoViewer() {
   viewer.hidden = true;
 }
 
-document.addEventListener("change", (event) => {
-  if (!event.target.matches("#photo-viewer-checkbox")) return;
-  const viewer = document.querySelector("#photo-viewer");
-  const checkbox = document.querySelector(`.photo-preview-trigger[data-photo-id="${viewer.dataset.photoId}"]`)?.closest(".photo")?.querySelector("input");
-  if (checkbox) checkbox.checked = event.target.checked;
-  fetch("/selection", {
-    method: "POST",
-    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-    body: new URLSearchParams({id: viewer.dataset.photoId, selected: String(event.target.checked)})
-  }).then((response) => {
-    if (!response.ok) throw new Error("Could not update selection");
-    if (event.target.checked) selectedIDs.add(viewer.dataset.photoId);
-    else selectedIDs.delete(viewer.dataset.photoId);
-    updateSelectionControls();
-  });
-});
-
 let indexProgressTimer;
 
 function setIndexingControls(active) {
@@ -304,16 +259,49 @@ function updateIndexProgress() {
     });
 }
 
-document.addEventListener("htmx:beforeRequest", (event) => {
-  if (!event.detail.elt.matches("[data-indexing]")) return;
+htmx.on('htmx:before:request', function (evt) {
+  console.log(evt);
+    let ctx = evt.detail.ctx;
+   let sourceElementId = ctx.sourceElement.id;
 
-  const status = document.querySelector("#index-progress");
-  status.hidden = false;
-  status.textContent = "Indexing: preparing files...";
-  setIndexingControls(true);
-  updateIndexProgress();
-  updateSelectionControls();
+    //if we're POSTing to /collections we need to include an array of the selected photo ids in the request body
+  if (ctx.request.method === 'POST' && ctx.request.action === '/collections') {
+    console.log('Adding selected photo ids to request body');
+    const selectedPhotoIds = Array.from(document.querySelectorAll('.photo input[type="checkbox"]:checked')).map(input => input.value);
+    //create a comma-separated string of the selected photo ids and add it to the request body
+    ctx.request.body.set('ids', selectedPhotoIds.join(','));
+  }
+  //if the source has the data-append-photo-ids attribute, we need to add the selected photo ids to the querystring
+  else if (ctx.sourceElement.hasAttribute('data-append-photo-ids')) {
+    //add the selected photoids to the querystring ids
+    console.log('Adding selected photo ids to querystring');
+    const selectedPhotoIds = Array.from(document.querySelectorAll('.photo input[type="checkbox"]:checked')).map(input => input.value);
+    //if the querystring already has an '?' we need to append with a '&', otherwise we append with a '?'
+    if (ctx.request.action.includes('?')) {
+      ctx.request.action = ctx.request.action + '&ids=' + selectedPhotoIds.join(',');
+    }
+    else {
+      ctx.request.action = ctx.request.action + '?ids=' + selectedPhotoIds.join(',');
+    }
+  }
+  console.log(evt);
 });
+
+/*
+document.addEventListener("htmx:beforeRequest", (event) => {
+  console.log('event', event);
+  if (event.detail.elt.matches("[data-indexing]")) {
+    const status = document.querySelector("#index-progress");
+    status.hidden = false;
+    status.textContent = "Indexing: preparing files...";
+    setIndexingControls(true);
+    updateIndexProgress();
+  }
+  else if (!event.detail.elt.matches("[data-stop-indexing]")) {
+    event.detail.elt.querySelector("button").disabled = true;
+  }
+});
+*/
 
 function initialisePhotoMap() {
   const element = document.querySelector("#photo-map");
@@ -409,8 +397,6 @@ function initialisePhotoMap() {
           element.hidden = true;
           clusterPhotosPanel.hidden = false;
           window.history.pushState({clusterURL}, "", clusterURL);
-          syncSelectionCheckboxes();
-          updateSelectionControls();
         }
 
         document.querySelector("#cluster-photos-back")?.addEventListener("click", () => {
@@ -471,15 +457,10 @@ function initialisePhotoMap() {
 }
 
 document.addEventListener("htmx:afterRequest", (event) => {
-  if (!event.detail.elt.matches("[data-indexing]")) return;
-
-  updateIndexProgress();
-});
-
-document.addEventListener("htmx:beforeRequest", (event) => {
-  if (!event.detail.elt.matches("[data-stop-indexing]")) return;
-
-  event.detail.elt.querySelector("button").disabled = true;
+  console.log("htmx:afterRequest", event.detail.elt);
+  if (event.detail.elt.matches("[data-indexing]")) {
+    updateIndexProgress();
+  }
 });
 
 updateIndexProgress();
@@ -492,4 +473,5 @@ if (location.pathname.startsWith("/image/")) {
   const trigger = document.querySelector(".photo-preview-trigger");
   if (trigger) showPhotoPreview(trigger);
 }
+
 window.addEventListener("load", initialisePhotoMap);

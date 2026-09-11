@@ -5,10 +5,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fast Fotos</title>
-  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://unpkg.com/htmx.org@4.0.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/ext/hx-download.js"></script>
   {{if eq .Page "locations"}}<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>{{end}}
   <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=search,map,photo_library,build,calendar_month" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=search,map,photo_library,build,calendar_month,check_box" />
 </head>
 <body class="page-{{.Page}}">
   <header>
@@ -20,30 +21,19 @@
       <a href="/collections" title="Collections"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Collections</span></a>
       <a href="/maintenance" title="Maintenance"><span aria-hidden="true" class="material-symbols-outlined">build</span><span class="sr-only">Maintenance</span></a>
     </nav>
-    <div class="header-actions">
-      <details class="action-menu">
-        <summary aria-label="Open actions menu"><span aria-hidden="true">&#9776;</span><span id="selection-count" class="selection-count" hidden></span><span class="sr-only">Actions</span></summary>
-        <div class="action-menu-panel">
-          <button type="button" id="add-to-collection-action" disabled>Add selected photos to collection</button>
-          <button type="button" id="download-with-raw" disabled>Download selected with raw files</button>
-          <button type="button" id="download-without-raw" disabled>Download selected without raw files</button>
-          <button type="button" id="clear-selection" disabled>Clear selected photos</button>
-        </div>
-      </details>
-    </div>
   </header>
   <main>{{template "content" .}}</main>
   <dialog id="add-to-collection-dialog">
-    <form id="add-to-collection-form" method="post" action="/collections" hx-post="/collections" hx-swap="none">
+    <form id="add-to-collection-form" hx-post="/collections" hx-swap="none">
       <input name="ids" type="hidden">
-      <h2>Add to gallery</h2>
-      <label>Existing gallery
-        <select name="gallery_id">
-          <option value="">Create a new gallery</option>
+      <h2>Add selected images to Collection</h2>
+      <label>Existing Collection
+        <select name="collection_id">
+          <option value="">Create a new Collection</option>
           {{range .Collections}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
         </select>
       </label>
-      <label>New collection name <input name="name" maxlength="200"></label>
+      <label>New Collection name <input name="name" maxlength="200"></label>
       <p id="add-to-collection-error" role="alert" hidden></p>
       <div class="dialog-actions"><button type="submit">Add photos</button><button type="button" data-close-gallery-dialog>Cancel</button></div>
     </form>
