@@ -1137,6 +1137,7 @@ func (s *Server) startIndexing(index func(context.Context) (int, error)) bool {
 		count, err := index(ctx)
 		s.finishIndexing(count, err)
 	}()
+	slog.Info("Started background indexing operation")
 	return true
 }
 
@@ -1149,6 +1150,7 @@ func (s *Server) stopIndexing(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "No indexing is in progress", http.StatusConflict)
 		return
 	}
+	slog.Info("Cancelling background indexing operation")
 	s.indexCancel()
 	w.WriteHeader(http.StatusNoContent)
 }

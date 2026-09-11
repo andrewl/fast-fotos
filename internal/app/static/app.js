@@ -220,8 +220,11 @@ function closePhotoViewer() {
 
 let indexProgressTimer;
 
+//update the indexing progress every 500ms if indexing is active
 function setIndexingControls(active) {
+  console.log("setIndexingControls", active);
   const stop = document.querySelector("[data-stop-indexing]");
+  console.log("stop", stop);
   if (!stop) return;
   document.querySelectorAll("[data-indexing] button").forEach((button) => {
     button.disabled = active;
@@ -231,13 +234,17 @@ function setIndexingControls(active) {
 
 function updateIndexProgress() {
   const status = document.querySelector("#index-progress");
-  if (!status) return;
+  if (!status) {
+    console.warn("No index progress element found");
+    return;
+  }
   fetch("/index-progress")
     .then((response) => {
       if (!response.ok) throw new Error("Could not load indexing progress");
       return response.json();
     })
     .then((progress) => {
+      console.log("Indexing progress:", progress);
       setIndexingControls(progress.active);
       if (progress.active) {
         status.hidden = false;
@@ -284,7 +291,26 @@ htmx.on('htmx:before:request', function (evt) {
       ctx.request.action = ctx.request.action + '?ids=' + selectedPhotoIds.join(',');
     }
   }
+  else if (ctx.sourceElement.hasAttribute("data-indexing")) {
+    console.log('Indexing request detected');
+    const status = document.querySelector("#index-progress");
+    console.log('status', status);  
+    status.hidden = false;
+    status.textContent = "Indexing: preparing files...";
+    setIndexingControls(true);
+  }
+  else if (ctx.sourceElement.hasAttribute("data-stop-indexing")) {
+    setIndexingControls(false);
+    ctx.sourceElement.disabled = true;
+  }
   console.log(evt);
+});
+
+htmx.on('htmx:after:request', function (evt) {
+  console.log(evt);
+  if (evt.srcElement.hasAttribute("data-indexing")) {
+    updateIndexProgress();
+  }
 });
 
 /*
@@ -455,13 +481,6 @@ function initialisePhotoMap() {
   map.on("moveend", loadPoints);
   window.setTimeout(() => map.resize(), 0);
 }
-
-document.addEventListener("htmx:afterRequest", (event) => {
-  console.log("htmx:afterRequest", event.detail.elt);
-  if (event.detail.elt.matches("[data-indexing]")) {
-    updateIndexProgress();
-  }
-});
 
 updateIndexProgress();
 if (document.readyState === "loading") {

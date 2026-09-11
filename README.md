@@ -108,7 +108,6 @@ npm run test:e2e
 TODO
 - Beef up tests - take screenshot on failed tests
 - This Week page? All items taken this week. day of week -3 days,+4 days (bear in mind wrap around)
-- Indexing feedback
 - Camera name
 - Export collection to csv
 - delete the current collection
