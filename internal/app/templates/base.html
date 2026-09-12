@@ -26,16 +26,20 @@
   <dialog id="add-to-collection-dialog">
     <form id="add-to-collection-form" hx-post="/collections" hx-swap="none">
       <input name="ids" type="hidden">
-      <h2>Add selected images to Collection</h2>
+      <h2>Add selected to Collection</h2>
+      <div>
       <label>Existing Collection
         <select name="collection_id">
           <option value="">Create a new Collection</option>
           {{range .Collections}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
         </select>
       </label>
+      </div>
+      <div>  
       <label>New Collection name <input name="name" maxlength="200"></label>
+      </div>
       <p id="add-to-collection-error" role="alert" hidden></p>
-      <div class="dialog-actions"><button type="submit">Add photos</button><button type="button" data-close-gallery-dialog>Cancel</button></div>
+      <div class="dialog-actions"><button data-close-collection-dialog type="submit">Add to Collection</button><button type="button" data-close-collection-dialog>Cancel</button></div>
     </form>
   </dialog>
   <section id="photo-viewer" class="photo-viewer" hidden aria-label="Photo viewer">

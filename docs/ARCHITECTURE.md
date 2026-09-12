@@ -62,13 +62,18 @@ only its membership pointers; it does not remove the gallery itself.
 ## Indexing lifecycle
 
 The supported photo extensions are AVIF, GIF, HEIC, JPEG/JPG, PNG, TIFF, and WebP.
+The supported video extensions are 3GP, AVI, FLV, M4V, MKV, MOV, MP4, MPEG/MPG, MTS,
+WebM, and WMV. Video files require `ffmpeg`/`ffprobe` to be available on `PATH`.
 For each candidate the indexer:
 
 1. Reads the filesystem modification time as the capture-time fallback.
-2. Reads EXIF capture time and GPS coordinates when available.
-3. Produces a 400px-max JPEG thumbnail when Go can decode the image. Unsupported
-   decoder formats remain indexed and retain an existing thumbnail.
-4. Upserts the record by source-relative `path`.
+2. Reads EXIF capture time and GPS coordinates when available (photos), or
+   `ffprobe` container/stream tags for creation time, GPS, and duration (videos).
+3. Produces a 400px-max JPEG thumbnail when Go can decode the image, or via
+   `ffmpeg`'s `thumbnail` filter for videos. Unsupported decoder formats remain
+   indexed and retain an existing thumbnail.
+4. Upserts the record by source-relative `path`, recording a `media_type` of
+   `photo` or `video` and, for videos, its `duration_seconds`.
 
 ### Incremental index
 

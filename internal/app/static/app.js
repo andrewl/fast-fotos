@@ -47,7 +47,14 @@ function selectNone() {
 
 //when the document has loaded then update the action menu
 document.addEventListener("DOMContentLoaded", () => {
+  //adds an eventlistener to each checkbox with the data-photo-selection attribute to update the action menu when the checkbox is changed
+  document.addEventListener("change", (event) => {
+    if (!event.target.matches("[data-photo-selection]")) return;
+    updateActionMenu();
+  });
+
  updateActionMenu();
+
 });
 
 document.addEventListener("click", (event) => {
@@ -69,14 +76,13 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("click", (event) => {
-  if (!event.target.matches("[data-close-gallery-dialog]")) return;
-
-  document.querySelector("#add-to-gallery-dialog").close();
-});
-
-document.addEventListener("click", (event) => {
-  if (event.target.matches("#photo-viewer-back")) {
+  target = event.target;
+  console.log(target);
+  if (target.matches("#photo-viewer-back")) {
     closePhotoViewer();
+  }
+  else if (target.matches("[data-close-collection-dialog]")) {
+    document.querySelector("#add-to-collection-dialog").close();
   }
 });
 

@@ -2,7 +2,7 @@
 {{define "content"}}
 <aside class="image-info">
   <a href="{{.ReturnURL}}">Back to {{.CollectionName}}</a>
-  <h2>Photo details</h2>
+  <h2>Details</h2>
   <label><input data-photo-selection type="checkbox" value="{{.Photo.ID}}"> Select photo</label>
   {{if .Photo.RawPath}}<p>Raw file available</p><a href="/raw/{{.Photo.ID}}">Download raw</a>{{end}}
   <dl>
@@ -20,6 +20,14 @@
   </div>
 </aside>
 <section class="image-panel">
+  <!-- if this is a video then we need to use a video tag instead of an img tag -->
+  {{if eq .Photo.MediaType "video" }}
+    <video controls>
+      <source src="/photos/{{.Photo.ID}}" type="video/mp4">
+      Your browser does not support the video tag.
+    </video>
+  {{else}}
   <img src="/photos/{{.Photo.ID}}" alt="{{.Photo.Path}}">
+  {{end}}
 </section>
 {{end}}

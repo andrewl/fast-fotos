@@ -139,24 +139,45 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if err != nil {
 		return err
 	}
-	rawPath, err := associatedRawPath(fullPath)
-	if err != nil {
-		return fmt.Errorf("find raw file for %s: %w", relativePath, err)
-	}
+	isVideo := videoExtensions[strings.ToLower(filepath.Ext(fullPath))]
+
 	rawRelativePath := ""
-	if rawPath != "" {
-		rawRelativePath, err = filepath.Rel(s.config.PhotoRoot, rawPath)
+	var takenAt time.Time
+	var latitude, longitude, focalLength, durationSeconds *float64
+	var cameraModel string
+	var flashFired *bool
+	var thumbnail []byte
+	mediaType := "photo"
+
+	if isVideo {
+		mediaType = "video"
+		takenAt, latitude, longitude, durationSeconds, err = readVideoMetadata(ctx, fullPath)
 		if err != nil {
-			return fmt.Errorf("resolve raw file for %s: %w", relativePath, err)
+			return fmt.Errorf("read %s: %w", relativePath, err)
 		}
-	}
-	takenAt, latitude, longitude, cameraModel, focalLength, flashFired, err := readMetadata(fullPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", relativePath, err)
-	}
-	thumbnail, err := createThumbnail(fullPath, s.config.ResizeFilter)
-	if err != nil {
-		return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
+		thumbnail, err = createVideoThumbnail(ctx, fullPath)
+		if err != nil {
+			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
+		}
+	} else {
+		rawPath, err := associatedRawPath(fullPath)
+		if err != nil {
+			return fmt.Errorf("find raw file for %s: %w", relativePath, err)
+		}
+		if rawPath != "" {
+			rawRelativePath, err = filepath.Rel(s.config.PhotoRoot, rawPath)
+			if err != nil {
+				return fmt.Errorf("resolve raw file for %s: %w", relativePath, err)
+			}
+		}
+		takenAt, latitude, longitude, cameraModel, focalLength, flashFired, err = readMetadata(fullPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", relativePath, err)
+		}
+		thumbnail, err = createThumbnail(fullPath, s.config.ResizeFilter)
+		if err != nil {
+			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
+		}
 	}
 	location := ""
 	settlement, region, country := "", "", ""
@@ -195,16 +216,17 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if location != "" {
 		locationSource = "extracted"
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, indexed_at)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17) ON CONFLICT (path) DO UPDATE
+	err = tx.QueryRow(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, duration_seconds, indexed_at)
+		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19) ON CONFLICT (path) DO UPDATE
 		SET taken_at = EXCLUDED.taken_at, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
 		raw_path = EXCLUDED.raw_path, thumbnail = COALESCE(EXCLUDED.thumbnail, photos.thumbnail), location = EXCLUDED.location, location_source = EXCLUDED.location_source,
 			settlement = EXCLUDED.settlement, region = EXCLUDED.region, country = EXCLUDED.country,
 			camera_model = EXCLUDED.camera_model, focal_length = EXCLUDED.focal_length,
-			flash_fired = EXCLUDED.flash_fired, objects = EXCLUDED.objects, dominant_colors = EXCLUDED.dominant_colors, indexed_at = EXCLUDED.indexed_at
+			flash_fired = EXCLUDED.flash_fired, objects = EXCLUDED.objects, dominant_colors = EXCLUDED.dominant_colors,
+			media_type = EXCLUDED.media_type, duration_seconds = EXCLUDED.duration_seconds, indexed_at = EXCLUDED.indexed_at
 		RETURNING id`,
 		relativePath, rawRelativePath, takenAt, latitude, longitude, thumbnail, location, locationSource, settlement, region, country,
-		cameraModel, focalLength, flashFired, labels, dominantColors, indexStartedAt).Scan(&photoID)
+		cameraModel, focalLength, flashFired, labels, dominantColors, mediaType, durationSeconds, indexStartedAt).Scan(&photoID)
 	if err != nil {
 		return err
 	}
@@ -226,7 +248,8 @@ func photoPathsModifiedSince(root string, modifiedSince *time.Time) ([]string, e
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || !photoExtensions[strings.ToLower(filepath.Ext(entry.Name()))] {
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if entry.IsDir() || !(photoExtensions[ext] || videoExtensions[ext]) {
 			return nil
 		}
 		info, err := entry.Info()

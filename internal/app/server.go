@@ -73,21 +73,28 @@ type IndexProgress struct {
 }
 
 type Photo struct {
-	ID             int64
-	Path           string
-	RawPath        string
-	TakenAt        time.Time
-	Latitude       *float64
-	Longitude      *float64
-	Location       string
-	Settlement     string
-	Region         string
-	Country        string
-	CameraModel    sql.NullString
-	FocalLength    *float64
-	FlashFired     *bool
-	Objects        []string
-	DominantColors []string
+	ID              int64
+	Path            string
+	RawPath         string
+	TakenAt         time.Time
+	Latitude        *float64
+	Longitude       *float64
+	Location        string
+	Settlement      string
+	Region          string
+	Country         string
+	CameraModel     sql.NullString
+	FocalLength     *float64
+	FlashFired      *bool
+	Objects         []string
+	DominantColors  []string
+	MediaType       string
+	DurationSeconds *float64
+}
+
+// IsVideo reports whether the photo record represents a video file rather than a still image.
+func (p Photo) IsVideo() bool {
+	return p.MediaType == "video"
 }
 
 // Month represents a calendar month grouping key and photo count.
@@ -267,6 +274,8 @@ func (s *Server) migrate(ctx context.Context) error {
 			flash_fired BOOLEAN,
 			objects TEXT[] NOT NULL DEFAULT '{}',
 			dominant_colors TEXT[] NOT NULL DEFAULT '{}',
+			media_type TEXT NOT NULL DEFAULT 'photo' CHECK (media_type IN ('photo', 'video')),
+			duration_seconds DOUBLE PRECISION,
 			indexed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail BYTEA;
@@ -281,6 +290,13 @@ func (s *Server) migrate(ctx context.Context) error {
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS flash_fired BOOLEAN;
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS objects TEXT[] NOT NULL DEFAULT '{}';
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS dominant_colors TEXT[] NOT NULL DEFAULT '{}';
+		ALTER TABLE photos ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'photo';
+		ALTER TABLE photos ADD COLUMN IF NOT EXISTS duration_seconds DOUBLE PRECISION;
+		DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'photos_media_type_check') THEN
+				ALTER TABLE photos ADD CONSTRAINT photos_media_type_check CHECK (media_type IN ('photo', 'video'));
+			END IF;
+		END $$;
 		CREATE TABLE IF NOT EXISTS index_state (
 			id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
 			last_indexed_at TIMESTAMPTZ NOT NULL
@@ -297,7 +313,8 @@ func (s *Server) migrate(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
 		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
-			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;`)
+			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type);`)
 	if err != nil {
 		slog.Error("migrate database", "error", err)
 		return fmt.Errorf("migrate database: %w", err)
@@ -1459,20 +1476,14 @@ func (s *Server) photosForCollection(ctx context.Context, galleryID int64) ([]Ph
 
 // photoByID loads a single Photo record by its database primary key ID.
 func (s *Server) photoByID(ctx context.Context, id int64) (Photo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors
-		FROM photos WHERE id = $1`, id)
-	if err != nil {
-		slog.Error("Error querying photo by ID: ", "err", err)
-		return Photo{}, err
-	}
-	defer rows.Close()
-	photos, err := collectPhotos(rows)
+	//put the id into an array of ints and pass it to collectPhotosByIDs to get the photo
+	photos, err := collectPhotosByIDs(ctx, s.pool, []int64{id})
 	if err != nil || len(photos) != 1 {
 		if err != nil {
 			slog.Error("Error collecting photo by ID: ", "err", err)
 			return Photo{}, err
 		}
-		return Photo{}, pgx.ErrNoRows
+		return Photo{}, err
 	}
 	return photos[0], nil
 }
@@ -1483,6 +1494,35 @@ type photoRows interface {
 	Scan(...any) error
 	Err() error
 }
+
+//collectPhotosByIDs queries multiple photos by their database primary key IDs and returns a slice of Photo structs.
+func collectPhotosByIDs(ctx context.Context, pool *pgxpool.Pool, ids []int64) ([]Photo, error) {
+	var photos []Photo
+	if len(ids) == 0 {
+		slog.Warn("No photo IDs provided for collection")
+		return nil, nil
+	}
+	
+	//get all of the photos with the given ids
+	rows, err := pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors, media_type FROM photos WHERE id = ANY($1)`, ids)
+
+	if err != nil {
+		slog.Error("Error querying photos by IDs: ", "err", err)
+		return nil, err
+	}
+
+	for rows.Next() {
+		var photo Photo
+		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors, &photo.MediaType); err != nil {
+			slog.Error("Error scanning photo row: ", "err", err)
+			return nil, err
+		}
+		photos = append(photos, photo)
+	}
+	return photos, rows.Err()
+}
+
+
 
 // collectPhotos scans database query result rows into a slice of Photo structs.
 func collectPhotos(rows photoRows) ([]Photo, error) {
