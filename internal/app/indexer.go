@@ -143,6 +143,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 
 	rawRelativePath := ""
 	var takenAt time.Time
+	var dayOfYear int
 	var latitude, longitude, focalLength, durationSeconds *float64
 	var cameraModel string
 	var flashFired *bool
@@ -155,6 +156,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		if err != nil {
 			return fmt.Errorf("read %s: %w", relativePath, err)
 		}
+		dayOfYear = takenAt.YearDay()
 		thumbnail, err = createVideoThumbnail(ctx, fullPath)
 		if err != nil {
 			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
@@ -174,6 +176,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		if err != nil {
 			return fmt.Errorf("read %s: %w", relativePath, err)
 		}
+		dayOfYear = takenAt.YearDay()
 		thumbnail, err = createThumbnail(fullPath, s.config.ResizeFilter)
 		if err != nil {
 			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
@@ -216,17 +219,17 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if location != "" {
 		locationSource = "extracted"
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, duration_seconds, indexed_at)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19) ON CONFLICT (path) DO UPDATE
+	err = tx.QueryRow(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
+		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19, $20) ON CONFLICT (path) DO UPDATE
 		SET taken_at = EXCLUDED.taken_at, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
 		raw_path = EXCLUDED.raw_path, thumbnail = COALESCE(EXCLUDED.thumbnail, photos.thumbnail), location = EXCLUDED.location, location_source = EXCLUDED.location_source,
 			settlement = EXCLUDED.settlement, region = EXCLUDED.region, country = EXCLUDED.country,
 			camera_model = EXCLUDED.camera_model, focal_length = EXCLUDED.focal_length,
 			flash_fired = EXCLUDED.flash_fired, objects = EXCLUDED.objects, dominant_colors = EXCLUDED.dominant_colors,
-			media_type = EXCLUDED.media_type, duration_seconds = EXCLUDED.duration_seconds, indexed_at = EXCLUDED.indexed_at
+			media_type = EXCLUDED.media_type, duration_seconds = EXCLUDED.duration_seconds, indexed_at = EXCLUDED.indexed_at, day_of_year = EXCLUDED.day_of_year
 		RETURNING id`,
 		relativePath, rawRelativePath, takenAt, latitude, longitude, thumbnail, location, locationSource, settlement, region, country,
-		cameraModel, focalLength, flashFired, labels, dominantColors, mediaType, durationSeconds, indexStartedAt).Scan(&photoID)
+		cameraModel, focalLength, flashFired, labels, dominantColors, mediaType, durationSeconds, indexStartedAt, dayOfYear).Scan(&photoID)
 	if err != nil {
 		return err
 	}

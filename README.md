@@ -107,8 +107,14 @@ npm run test:e2e
 
 TODO
 - Beef up tests - take screenshot on failed tests
-- This Week page? All items taken this week. day of week -3 days,+4 days (bear in mind wrap around)
 - Camera name
 - Export collection to csv
 - delete the current collection
-- support for videos!
+- remove photo from current collection
+- selection on individual page doesn't persist
+- better thumbail for video
+- upload selection to...
+- do we need all of the db queries for each page?
+- move to collectphotosbyid + test
+- make search fields smaller
+- hide/unhide left panel

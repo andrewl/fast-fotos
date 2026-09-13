@@ -90,6 +90,7 @@ type Photo struct {
 	DominantColors  []string
 	MediaType       string
 	DurationSeconds *float64
+	DayOfYear       int
 }
 
 // IsVideo reports whether the photo record represents a video file rather than a still image.
@@ -225,6 +226,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /search/", s.search)
 	mux.HandleFunc("GET /maintenance", s.maintenance)
 	mux.HandleFunc("GET /months/", s.month)
+	mux.HandleFunc("GET /this-week/", s.thisweek)
 	mux.HandleFunc("GET /locations", s.locations)
 	mux.HandleFunc("GET /cluster", s.cluster)
 	mux.HandleFunc("GET /api/map-points", s.mapPoints)
@@ -276,6 +278,7 @@ func (s *Server) migrate(ctx context.Context) error {
 			dominant_colors TEXT[] NOT NULL DEFAULT '{}',
 			media_type TEXT NOT NULL DEFAULT 'photo' CHECK (media_type IN ('photo', 'video')),
 			duration_seconds DOUBLE PRECISION,
+			day_of_year SMALLINT,
 			indexed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail BYTEA;
@@ -292,6 +295,7 @@ func (s *Server) migrate(ctx context.Context) error {
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS dominant_colors TEXT[] NOT NULL DEFAULT '{}';
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'photo';
 		ALTER TABLE photos ADD COLUMN IF NOT EXISTS duration_seconds DOUBLE PRECISION;
+		ALTER TABLE photos ADD COLUMN IF NOT EXISTS day_of_year SMALLINT;
 		DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'photos_media_type_check') THEN
 				ALTER TABLE photos ADD CONSTRAINT photos_media_type_check CHECK (media_type IN ('photo', 'video'));
@@ -314,7 +318,8 @@ func (s *Server) migrate(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
 		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
 			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type);`)
+		CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type);
+		CREATE INDEX IF NOT EXISTS photos_day_of_year ON photos (day_of_year);`)
 	if err != nil {
 		slog.Error("migrate database", "error", err)
 		return fmt.Errorf("migrate database: %w", err)
@@ -759,6 +764,18 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "gallery", PageData{Photos: photos, SelectedMonth: month})
 }
+
+// thiswweek renders the photo grid HTML template partial for this week
+func (s *Server) thisweek(w http.ResponseWriter, r *http.Request) {
+	photos, err := s.photosForThisWeek(r.Context())
+	if err != nil {
+		slog.Error("Failed to load photos for this week", "error", err)
+		http.Error(w, "Could not load photos", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "thisweek", PageData{Photos: photos})
+}
+
 
 // locations renders the interactive Leaflet map and location selection sidebar.
 func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
@@ -1440,6 +1457,42 @@ func (s *Server) photosForMonth(ctx context.Context, month string) ([]Photo, err
 	return collectPhotos(rows)
 }
 
+// photosForThisWeek queries all photos captured within a specific calendar month key (YYYY-MM).
+func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
+
+	//get the day of year for the current date
+	dayOfYear := time.Now().YearDay()
+
+	//the week will consist of 3 days before the curreny dayOfYear and 3 days after
+	//but need to take into account days at the start and end of the year
+	startOfWeek := (dayOfYear - 3) % 365
+	endOfWeek := (dayOfYear + 3) % 365
+
+
+	
+
+	slog.Info("Getting photos for this week", "startOfWeek", startOfWeek, "endOfWeek", endOfWeek)
+
+	//get all the photo ids where day_of_year field is bettween startOfWeek and endOfWeek
+	//and put them in an array
+	rows, err := s.pool.Query(ctx, `SELECT id FROM photos where day_of_year >= $1 AND day_of_year <= $2 ORDER BY taken_at ASC`, startOfWeek, endOfWeek)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+	photoIDs := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			photoIDs = append(photoIDs, id)
+		}
+	}
+	
+	return collectPhotosByIDs(ctx, s.pool, photoIDs)
+}
+
+
 // galleries queries all user-created galleries and their photo counts.
 func (s *Server) collections(ctx context.Context) ([]Collection, error) {
 	rows, err := s.pool.Query(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)::int
@@ -1499,12 +1552,12 @@ type photoRows interface {
 func collectPhotosByIDs(ctx context.Context, pool *pgxpool.Pool, ids []int64) ([]Photo, error) {
 	var photos []Photo
 	if len(ids) == 0 {
-		slog.Warn("No photo IDs provided for collection")
+		slog.Warn("collectPhotosByIDs called with empty ids slice")
 		return nil, nil
 	}
 	
 	//get all of the photos with the given ids
-	rows, err := pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors, media_type FROM photos WHERE id = ANY($1)`, ids)
+	rows, err := pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, day_of_year FROM photos WHERE id = ANY($1)`, ids)
 
 	if err != nil {
 		slog.Error("Error querying photos by IDs: ", "err", err)
@@ -1513,7 +1566,7 @@ func collectPhotosByIDs(ctx context.Context, pool *pgxpool.Pool, ids []int64) ([
 
 	for rows.Next() {
 		var photo Photo
-		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors, &photo.MediaType); err != nil {
+		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors, &photo.MediaType, &photo.DayOfYear); err != nil {
 			slog.Error("Error scanning photo row: ", "err", err)
 			return nil, err
 		}
@@ -1574,7 +1627,9 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"locations":      {"templates/base.html", "templates/locations.html"},
 		"cluster":        {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
 		"collections":    {"templates/base.html", "templates/collections.html"},
-		"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
+		//"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
+		"collection": {"templates/base.html", "templates/collection.html"},
+		"thisweek": {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {
