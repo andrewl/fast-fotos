@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,32 +155,34 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		mediaType = "video"
 		takenAt, latitude, longitude, durationSeconds, err = readVideoMetadata(ctx, fullPath)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", relativePath, err)
+			slog.Warn("read video metadata for %s: %v", relativePath, err)
 		}
-		dayOfYear = takenAt.YearDay()
+		if err == nil {
+		    dayOfYear = takenAt.YearDay()
+		}
 		thumbnail, err = createVideoThumbnail(ctx, fullPath)
 		if err != nil {
-			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
+			slog.Warn("create video thumbnail for %s: %v", relativePath, err)
 		}
 	} else {
 		rawPath, err := associatedRawPath(fullPath)
-		if err != nil {
-			return fmt.Errorf("find raw file for %s: %w", relativePath, err)
-		}
-		if rawPath != "" {
-			rawRelativePath, err = filepath.Rel(s.config.PhotoRoot, rawPath)
-			if err != nil {
-				return fmt.Errorf("resolve raw file for %s: %w", relativePath, err)
+		if err == nil {
+			if rawPath != "" {
+				rawRelativePath, _ = filepath.Rel(s.config.PhotoRoot, rawPath)
+				if err != nil {
+					slog.Warn("resolve raw file for %s: %v", relativePath, err)
+				}
 			}
 		}
 		takenAt, latitude, longitude, cameraModel, focalLength, flashFired, err = readMetadata(fullPath)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", relativePath, err)
+			slog.Warn("read metadata for %s: %v", relativePath, err)
+		} else {
+			dayOfYear = takenAt.YearDay()
 		}
-		dayOfYear = takenAt.YearDay()
 		thumbnail, err = createThumbnail(fullPath, s.config.ResizeFilter)
 		if err != nil {
-			return fmt.Errorf("create thumbnail for %s: %w", relativePath, err)
+			slog.Warn("create thumbnail for %s: %v", relativePath, err)
 		}
 	}
 	location := ""
@@ -187,7 +190,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if latitude != nil && longitude != nil && s.geocoder != nil {
 		resolved, err := s.geocoder.ReverseGeocode(ctx, *latitude, *longitude)
 		if err != nil {
-			return fmt.Errorf("reverse geocode %s: %w", relativePath, err)
+			slog.Warn("reverse geocode for %s: %v", relativePath, err)
 		}
 		location = resolved.String()
 		settlement, region, country = resolved.Settlement, resolved.Region, resolved.Country
@@ -196,7 +199,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if s.detector != nil && thumbnail != nil {
 		labels, err = s.detector.Detect(ctx, thumbnail)
 		if err != nil {
-			return fmt.Errorf("detect objects in %s: %w", relativePath, err)
+			slog.Warn("object detection for %s: %v", relativePath, err)
 		}
 	}
 	if labels == nil {
