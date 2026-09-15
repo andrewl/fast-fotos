@@ -1468,27 +1468,28 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 	startOfWeek := (dayOfYear - 3) % 365
 	endOfWeek := (dayOfYear + 3) % 365
 
-
-	
-
-	slog.Info("Getting photos for this week", "startOfWeek", startOfWeek, "endOfWeek", endOfWeek)
-
 	//get all the photo ids where day_of_year field is bettween startOfWeek and endOfWeek
 	//and put them in an array
-	rows, err := s.pool.Query(ctx, `SELECT id FROM photos where day_of_year >= $1 AND day_of_year <= $2 ORDER BY taken_at ASC`, startOfWeek, endOfWeek)
+	rows, err := s.pool.Query(ctx, `SELECT id FROM photos where day_of_year > $1 AND day_of_year <= $2 ORDER BY taken_at ASC`, startOfWeek, endOfWeek)
+
 	if err != nil {
+		slog.Error("Error querying photos for this week: ", "err", err)
 		return nil, err
 	}
 
 	defer rows.Close()
 	photoIDs := []int64{}
+
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		err := rows.Scan(&id)
+
+		if err != nil {
+			slog.Error("Error scanning photo id for this week: ", "err", err)
+		} else {
 			photoIDs = append(photoIDs, id)
 		}
 	}
-	
 	return collectPhotosByIDs(ctx, s.pool, photoIDs)
 }
 
@@ -1627,8 +1628,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"locations":      {"templates/base.html", "templates/locations.html"},
 		"cluster":        {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
 		"collections":    {"templates/base.html", "templates/collections.html"},
-		//"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
-		"collection": {"templates/base.html", "templates/collection.html"},
+		"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
 		"thisweek": {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
