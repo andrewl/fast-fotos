@@ -277,24 +277,23 @@ htmx.on('htmx:before:request', function (evt) {
     let ctx = evt.detail.ctx;
    let sourceElementId = ctx.sourceElement.id;
 
-    //if we're POSTing to /collections we need to include an array of the selected photo ids in the request body
-  if (ctx.request.method === 'POST' && ctx.request.action === '/collections') {
-    console.log('Adding selected photo ids to request body');
-    const selectedPhotoIds = Array.from(document.querySelectorAll('.photo input[type="checkbox"]:checked')).map(input => input.value);
-    //create a comma-separated string of the selected photo ids and add it to the request body
-    ctx.request.body.set('ids', selectedPhotoIds.join(','));
-  }
   //if the source has the data-append-photo-ids attribute, we need to add the selected photo ids to the querystring
-  else if (ctx.sourceElement.hasAttribute('data-append-photo-ids')) {
-    //add the selected photoids to the querystring ids
-    console.log('Adding selected photo ids to querystring');
+  //or body of the request depending on the method
+  if (ctx.sourceElement.hasAttribute('data-append-photo-ids')) {
+    console.log('Adding selected photo ids');
     const selectedPhotoIds = Array.from(document.querySelectorAll('.photo input[type="checkbox"]:checked')).map(input => input.value);
-    //if the querystring already has an '?' we need to append with a '&', otherwise we append with a '?'
-    if (ctx.request.action.includes('?')) {
-      ctx.request.action = ctx.request.action + '&ids=' + selectedPhotoIds.join(',');
+
+    if (ctx.request.method != 'GET') {
+      ctx.request.body.set('ids', selectedPhotoIds.join(','));
     }
     else {
-      ctx.request.action = ctx.request.action + '?ids=' + selectedPhotoIds.join(',');
+      //if the querystring already has an '?' we need to append with a '&', otherwise we append with a '?'
+      if (ctx.request.action.includes('?')) {
+        ctx.request.action = ctx.request.action + '&ids=' + selectedPhotoIds.join(',');
+      }
+      else {
+        ctx.request.action = ctx.request.action + '?ids=' + selectedPhotoIds.join(',');
+      }
     }
   }
   else if (ctx.sourceElement.hasAttribute("data-indexing")) {

@@ -2,7 +2,11 @@
 {{define "content"}}
 <section class="galleries">
   <div class="gallery-head"><h1>Collections</h1></div>
-  {{range .Collections}}<a class="gallery-link" href="/collections/{{.ID}}"><strong>{{.Name}}</strong><span>{{.Count}} photos</span></a>{{else}}
-  <p>No custom galleries yet. Select photos from the timeline to create one.</p>{{end}}
+  <p>THIS IS THE COLLECTIONS TEMPLATE</p>
+  {{range .Collections}}
+  <span hx-delete="/collections/{{.ID}}">D</span><a class="gallery-link" href="/collections/{{.ID}}"><strong>{{.Name}}</strong><span>{{.Count}} photos</span></a>
+  {{else}}
+  <p>No collections yet. Select photos from the timeline to create one.</p>
+  {{end}}
 </section>
 {{end}}

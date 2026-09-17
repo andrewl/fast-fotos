@@ -118,3 +118,6 @@ TODO
 - move to collectphotosbyid + test
 - make search fields smaller
 - hide/unhide left panel
+- reindex all should remove photos which don't exist
+- better thumbnails option
+- geocode option

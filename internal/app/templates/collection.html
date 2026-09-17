@@ -2,8 +2,11 @@
 {{define "content"}}
 <aside>
   <h2>Collections</h2>
-  {{range .Collections}}<a class="month{{if and $.Collection (eq .ID $.Collection.ID)}} active{{end}}"{{if and $.Collection (eq .ID $.Collection.ID)}} aria-current="page"{{end}} href="/collection/{{.ID}}">{{.Name}} <span>{{.Count}}</span></a>{{else}}
-  <p>No collections yet.</p>{{end}}
+  {{range .Collections}}
+  <span class="material-symbols-outlined" aria-hidden="true" hx-delete="/collections/{{.ID}}">delete</span><a class="month{{if and $.Collection (eq .ID $.Collection.ID)}} active{{end}}"{{if and $.Collection (eq .ID $.Collection.ID)}} aria-current="page"{{end}} href="/collection/{{.ID}}">{{.Name}} <span>{{.Count}}</span></a>
+  {{else}}
+  <p>No collections yet.</p>
+  {{end}}
 </aside>
 <section id="gallery">{{template "gallery-content" .}}</section>
 {{end}}

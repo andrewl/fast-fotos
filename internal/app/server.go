@@ -231,9 +231,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /cluster", s.cluster)
 	mux.HandleFunc("GET /api/map-points", s.mapPoints)
 	mux.HandleFunc("GET /api/map-cluster", s.mapCluster)
-	mux.HandleFunc("GET /collections", s.allCollectionsPage)
 	mux.HandleFunc("GET /collection/", s.collectionPage)
-	mux.HandleFunc("POST /collections", s.addToCollection)
+	mux.HandleFunc("POST /collection", s.addToCollection)
+	mux.HandleFunc("DELETE /collection/", s.removeFromCollection)
+	mux.HandleFunc("DELETE /collections/", s.deleteCollection)
 	mux.HandleFunc("POST /index", s.index)
 	mux.HandleFunc("POST /reindex", s.reindex)
 	mux.HandleFunc("POST /stop-indexing", s.stopIndexing)
@@ -371,13 +372,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	galleries, err := s.collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
-		return
-	}
-	s.render(w, "home", PageData{Months: months, Collections: galleries, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
+	s.render(w, "home", PageData{Months: months, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
 }
 
 // timeline renders the photo gallery for a specific month (e.g. /timeline/2026-08).
@@ -402,13 +397,7 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
-	galleries, err := s.collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
-		return
-	}
-	s.render(w, "home", PageData{Page: "home", Months: months, Collections: galleries, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
+	s.render(w, "home", PageData{Page: "home", Months: months, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
 }
 
 // image renders the detail page for a single photo including EXIF metadata and navigation links.
@@ -1033,6 +1022,7 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 	return minLatitude, maxLatitude, minLongitude, maxLongitude, nil
 }
 
+/*
 // galleriesPage renders the custom galleries list page or redirects to the first gallery.
 func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
 	collections, err := s.collections(r.Context())
@@ -1048,13 +1038,30 @@ func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, "collections", PageData{Collections: collections})
 }
+*/
+
 
 // gallery renders the detail grid page for a collection
 func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
+	//if we have no collections yet just render the page - the template will take care of it
+	collections, err := s.collections(r.Context())
+
+	if err != nil {
+		slog.Error("Failed to load collections", "error", err)
+		http.Error(w, "Could not load collections", http.StatusInternalServerError)
+		return
+	}
+
+	if len(collections) == 0 {
+		s.render(w, "collection", PageData{Collections: collections, Collection: nil, Photos: nil, ReturnURL: r.URL.Path})
+		return
+	}
+
 	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/collection/"), 10, 64)
 	if err != nil || id < 1 {
 		slog.Error("Invalid collection ID", "error", err)
-		http.NotFound(w, r)
+		slog.Info("Redirecting to first collection", "collectionID", collections[0].ID)
+		http.Redirect(w, r, fmt.Sprintf("/collection/%d", collections[0].ID), http.StatusSeeOther)
 		return
 	}
 	var collection Collection 
@@ -1069,12 +1076,6 @@ func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("Failed to load collection photos", "collection_id", id, "error", err)
 		http.Error(w, "Could not load collection", http.StatusInternalServerError)
-		return
-	}
-	collections, err := s.collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load collections", "error", err)
-		http.Error(w, "Could not load collections", http.StatusInternalServerError)
 		return
 	}
 	s.render(w, "collection", PageData{Collections: collections, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
@@ -1111,31 +1112,86 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) removeFromCollection(w http.ResponseWriter, r *http.Request) {
+	ids := r.FormValue("ids")
+	if ids == "" {
+		slog.Error("No photo IDs provided for gallery deletion")
+		http.Error(w, "Select at least one photo to remove from a gallery", http.StatusBadRequest)
+		return
+	}
+	galleryID, err := s.selectCollection(r.Context(), r.FormValue("collection_id"), "")
+	if err != nil {
+		slog.Error("Failed to select gallery to delete item from", "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, err = s.pool.Exec(r.Context(), `DELETE FROM collection_photos WHERE collection_id = $1
+		AND photo_ id = ANY(string_to_array($2, ',')::bigint[])`, galleryID, ids)
+	if err != nil {
+		slog.Error("Failed to remove photos from gallery", "collection_id", galleryID, "error", err)
+		http.Error(w, "Could not remove photos from gallery", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// addToCollection adds selected photo IDs to an existing or newly created custom gallery.
+func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
+	collectionID := strings.TrimPrefix(r.URL.Path, "/collections/")
+	galleryID, err := s.selectCollection(r.Context(), collectionID, "")
+	if err != nil {
+		slog.Error("Failed to select collection to remove", "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, err = s.pool.Exec(r.Context(), `DELETE FROM collections WHERE id = $1`, galleryID)
+	if err != nil {
+		slog.Error("Failed to delete collection", "collection_id", galleryID, "error", err)
+		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
+		return
+	}
+	_, err = s.pool.Exec(r.Context(), `DELETE FROM collection_photos WHERE collection_id = $1`, galleryID)
+	if err != nil {
+		slog.Error("Failed to delete photos from collection", "collection_id", galleryID, "error", err)
+		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // selectCollection validates an existing gallery ID or creates a new named gallery record.
 func (s *Server) selectCollection(ctx context.Context, existingID, name string) (int64, error) {
 	if existingID != "" {
 		id, err := strconv.ParseInt(existingID, 10, 64)
 		if err != nil || id < 1 {
+			slog.Error("Invalid collection ID provided", "collection_id", existingID, "error", err)
 			return 0, fmt.Errorf("invalid collection")
 		}
 		var found bool
 		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 from collections WHERE id = $1)", id).Scan(&found); err != nil {
+			slog.Error("Failed to look up collection existence", "collection_id", id, "error", err)
 			return 0, fmt.Errorf("look up collections: %w", err)
 		}
 		if !found {
+			slog.Error("Collection does not exist", "collection_id", id)
 			return 0, fmt.Errorf("collection does not exist")
 		}
 		return id, nil
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
+		slog.Error("No collection name provided for new collection creation")
 		return 0, fmt.Errorf("enter a new collection name or choose an existing collection")
 	}
 	if len(name) > 200 {
+		slog.Error("Collection name exceeds maximum length of 200 characters", "collection_name_length", len(name))
 		return 0, fmt.Errorf("collection name must be 200 characters or fewer")
 	}
 	var id int64
 	if err := s.pool.QueryRow(ctx, "INSERT INTO collections (name) VALUES ($1) RETURNING id", name).Scan(&id); err != nil {
+		slog.Error("Failed to create new collection", "collection_name", name, "error", err)
 		return 0, fmt.Errorf("create collection: %w", err)
 	}
 	return id, nil
