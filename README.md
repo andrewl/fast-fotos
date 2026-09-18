@@ -107,17 +107,16 @@ npm run test:e2e
 
 TODO
 - Beef up tests - take screenshot on failed tests
-- Camera name
+* Camera name
 - Export collection to csv
-- delete the current collection
-- remove photo from current collection
-- selection on individual page doesn't persist
+* remove photo from current collection
+- remove selection on individual page (and move options to left-side?)
 - better thumbail for video
 - upload selection to...
-- do we need all of the db queries for each page?
 - move to collectphotosbyid + test
-- make search fields smaller
+* make search fields smaller
 - hide/unhide left panel
 - reindex all should remove photos which don't exist
 - better thumbnails option
 - geocode option
+- logging some things (eg indexing) to a db table which can be purged and viewed

@@ -136,10 +136,19 @@ func (s *Server) indexPhotoPaths(ctx context.Context, modifiedSince *time.Time, 
 
 // indexPhoto extracts metadata, creates thumbnails, detects objects/colors, reverse geocodes, and saves a photo record to the database.
 func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt time.Time) error {
+
+	//we want to use defer here because some broken jpegs can panic the decoder
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("panic while indexing %s: %v", fullPath, r)
+		}
+	} ()
+
 	relativePath, err := filepath.Rel(s.config.PhotoRoot, fullPath)
 	if err != nil {
 		return err
 	}
+	slog.Info("indexing %s", relativePath, relativePath)
 	isVideo := videoExtensions[strings.ToLower(filepath.Ext(fullPath))]
 
 	rawRelativePath := ""
@@ -155,7 +164,6 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		mediaType = "video"
 		takenAt, latitude, longitude, durationSeconds, err = readVideoMetadata(ctx, fullPath)
 		if err != nil {
-			slog.Warn("read video metadata for %s: %v", relativePath, err)
 		}
 		if err == nil {
 		    dayOfYear = takenAt.YearDay()
