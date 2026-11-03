@@ -1,6 +1,6 @@
 A web-based photo viewing and indexing application.
 
-Written in go with minimal dependencies and htmx front-end with postgresql for data storage.
+Written in go with minimal dependencies and htmx front-end with SQLite for data storage.
 
 Dockerized
 
@@ -18,7 +18,7 @@ PHOTO_ROOT=/absolute/path/to/photos docker compose up --build
 
 Open http://localhost:8080 and choose **Index photos** or **Reindex all**. The source directory is mounted
 read-only. Files retain their directory structure; Fast Fotos stores relative paths,
-extracted capture time/GPS coordinates, and 400px JPEG thumbnails in PostgreSQL.
+extracted capture time/GPS coordinates, and 400px JPEG thumbnails in SQLite.
 Indexing continues in the background if you refresh or navigate away; its progress and a stop control remain
 available in the header.
 
@@ -88,14 +88,13 @@ and valid. Images without an embedded thumbnail continue to use a generated,
 Keep your photos in their existing directory structure.
 
 Scales to millions of photos.
-
-Displays your photos by
+Displays your photos
 - month/year
 - location (on a vmap)
 
 View as thumbnails, lists, full screen
  
-Features
+Featurese
 - view photo metadata
 - select one or more images
 - download selection with or without associated raw files, including same-basename sidecar files
@@ -106,15 +105,26 @@ go test -v ./...
 npm run test:e2e
 
 TODO
+- saved as new collection
+-- create collection called 'saved items' with id = 1. this cannot be deleted
+-- gallery template should get the saved value and set the checkbox to this value. can this be done in collect photos?
+-- changing the checkbox should add/remove to collection id 1
+-- unselect all should be 'remove from saved items' and remove all in gallery to collection id 1 (if we're viewing collection id 1 then we should refresh)
+-- select all should be 'add to saved items' and add all in gallery to collection id 1 (but don't display this for collection id 1)
+-- then you can save a bunch of items and then add them to another collection!
+
 - Beef up tests - take screenshot on failed tests
 * Camera name
 - Export collection to csv
 * remove photo from current collection
 - remove selection on individual page (and move options to left-side?)
-- better thumbail for video
+- keyboard shortcuts for everything
+- better way of identifying video
 - upload selection to...
-- move to collectphotosbyid + test
+- move to collectphotosbyid 
 * make search fields smaller
+- new search criteria - media type, video length, orientation, min height or width
+- create 'default' 'selected' collection - cannot be deleted.
 - hide/unhide left panel
 - reindex all should remove photos which don't exist
 - better thumbnails option

@@ -13,6 +13,3 @@ services:
         source: ./test-images
         target: /test-images
         read_only: true
-  db:
-    ports: !override []
-    volumes: !override []

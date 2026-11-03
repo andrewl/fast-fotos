@@ -10,7 +10,7 @@ import (
 
 // Config holds configuration parameters for running the application.
 type Config struct {
-	DatabaseURL    string
+	DatabasePath   string
 	PhotoRoot      string
 	ListenAddress  string
 	IndexWorkers   int
@@ -22,7 +22,7 @@ type Config struct {
 // ConfigFromEnvironment loads and validates application configuration settings from environment variables.
 func ConfigFromEnvironment() (Config, error) {
 	config := Config{
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		DatabasePath:   os.Getenv("DATABASE_PATH"),
 		PhotoRoot:      os.Getenv("PHOTO_ROOT"),
 		ListenAddress:  os.Getenv("LISTEN_ADDR"),
 		IndexWorkers:   defaultIndexWorkers(),
@@ -30,8 +30,8 @@ func ConfigFromEnvironment() (Config, error) {
 		GeoNamesDir:    os.Getenv("GEONAMES_DIR"),
 		ObjectModelDir: os.Getenv("OBJECT_MODEL_DIR"),
 	}
-	if config.DatabaseURL == "" {
-		return Config{}, errors.New("DATABASE_URL is required")
+	if config.DatabasePath == "" {
+		config.DatabasePath = "fast-fotos.db"
 	}
 	if config.PhotoRoot == "" {
 		return Config{}, errors.New("PHOTO_ROOT is required")

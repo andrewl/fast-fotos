@@ -5,6 +5,12 @@ set -eu
 geonames_directory="${GEONAMES_DIR:-}"
 object_model_directory="${OBJECT_MODEL_DIR:-}"
 
+database_path="${DATABASE_PATH:-}"
+if [ -n "$database_path" ]; then
+  mkdir -p "$(dirname "$database_path")"
+  chown appuser:appuser "$(dirname "$database_path")"
+fi
+
 if [ -n "$geonames_directory" ]; then
   chown appuser:appuser "$geonames_directory"
 fi

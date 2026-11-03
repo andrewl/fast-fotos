@@ -26,8 +26,6 @@ import (
 
 	"github.com/andrewl/fast-fotos/internal/geocode"
 	"github.com/andrewl/fast-fotos/internal/objects"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 //go:embed templates/*.html
@@ -39,7 +37,7 @@ var staticFiles embed.FS
 // Server represents the web application server instance, managing database connections, templates, geocoding, and object detection.
 type Server struct {
 	config          Config
-	pool            *pgxpool.Pool
+	db              *DB
 	templates       map[string]*template.Template
 	indexProgressMu sync.RWMutex
 	indexProgress   IndexProgress
@@ -169,19 +167,19 @@ type mapPoint struct {
 	Location     string  `json:"location,omitempty"`
 }
 
-// NewServer connects to PostgreSQL, runs database migrations, parses templates, and returns an initialized Server.
+// NewServer opens the SQLite database, runs migrations, parses templates, and returns an initialized Server.
 func NewServer(ctx context.Context, config Config) (*Server, error) {
-	pool, err := pgxpool.New(ctx, config.DatabaseURL)
+	db, err := OpenDB(ctx, config.DatabasePath)
 	if err != nil {
-		slog.Error("connect to database", "error", err)
-		return nil, fmt.Errorf("connect to database: %w", err)
+		slog.Error("open database", "error", err)
+		return nil, err
 	}
-	server := &Server{config: config, pool: pool}
+	server := &Server{config: config, db: db}
 	if config.GeoNamesDir != "" {
 		server.geocoder, err = geocode.LoadGeoNamesProvider(config.GeoNamesDir)
 		if err != nil {
 			slog.Error("load GeoNames data", "error", err)
-			pool.Close()
+			db.Close()
 			return nil, fmt.Errorf("load GeoNames data: %w", err)
 		}
 	}
@@ -189,19 +187,14 @@ func NewServer(ctx context.Context, config Config) (*Server, error) {
 		server.detector, err = objects.LoadONNXDetector(config.ObjectModelDir)
 		if err != nil {
 			slog.Error("load object detector", "error", err)
-			pool.Close()
+			db.Close()
 			return nil, fmt.Errorf("load object detector: %w", err)
 		}
-	}
-	if err := server.migrate(ctx); err != nil {
-		slog.Error("run database migrations", "error", err)
-		pool.Close()
-		return nil, err
 	}
 	server.templates, err = parseTemplates()
 	if err != nil {
 		slog.Error("parse templates", "error", err)
-		pool.Close()
+		db.Close()
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
 	return server, nil
@@ -212,7 +205,7 @@ func (s *Server) Close() {
 	if detector, ok := s.detector.(interface{ Close() error }); ok {
 		_ = detector.Close()
 	}
-	s.pool.Close()
+	s.db.Close()
 }
 
 // Routes constructs and returns an http.Handler with all application endpoints configured.
@@ -256,105 +249,9 @@ func mustSub(files embed.FS, directory string) fs.FS {
 	return sub
 }
 
-// migrate creates and updates application database tables, columns, and indexes.
-func (s *Server) migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS photos (
-			id BIGSERIAL PRIMARY KEY,
-			path TEXT UNIQUE NOT NULL,
-			raw_path TEXT,
-			taken_at TIMESTAMPTZ NOT NULL,
-			latitude DOUBLE PRECISION,
-			longitude DOUBLE PRECISION,
-			thumbnail BYTEA,
-			location TEXT,
-			location_source TEXT,
-			settlement TEXT,
-			region TEXT,
-			country TEXT,
-			camera_model TEXT,
-			focal_length DOUBLE PRECISION,
-			flash_fired BOOLEAN,
-			objects TEXT[] NOT NULL DEFAULT '{}',
-			dominant_colors TEXT[] NOT NULL DEFAULT '{}',
-			media_type TEXT NOT NULL DEFAULT 'photo' CHECK (media_type IN ('photo', 'video')),
-			duration_seconds DOUBLE PRECISION,
-			day_of_year SMALLINT,
-			indexed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS thumbnail BYTEA;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS raw_path TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS location TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS location_source TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS settlement TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS region TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS country TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS camera_model TEXT;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS focal_length DOUBLE PRECISION;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS flash_fired BOOLEAN;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS objects TEXT[] NOT NULL DEFAULT '{}';
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS dominant_colors TEXT[] NOT NULL DEFAULT '{}';
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS media_type TEXT NOT NULL DEFAULT 'photo';
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS duration_seconds DOUBLE PRECISION;
-		ALTER TABLE photos ADD COLUMN IF NOT EXISTS day_of_year SMALLINT;
-		DO $$ BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'photos_media_type_check') THEN
-				ALTER TABLE photos ADD CONSTRAINT photos_media_type_check CHECK (media_type IN ('photo', 'video'));
-			END IF;
-		END $$;
-		CREATE TABLE IF NOT EXISTS index_state (
-			id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-			last_indexed_at TIMESTAMPTZ NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS collections (
-			id BIGSERIAL PRIMARY KEY,
-			name TEXT UNIQUE NOT NULL CHECK (length(trim(name)) > 0),
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-		CREATE TABLE IF NOT EXISTS collection_photos (
-			collection_id BIGINT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
-			photo_id BIGINT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-			PRIMARY KEY (collection_id, photo_id)
-		);
-		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
-		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
-			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type);
-		CREATE INDEX IF NOT EXISTS photos_day_of_year ON photos (day_of_year);`)
-	if err != nil {
-		slog.Error("migrate database", "error", err)
-		return fmt.Errorf("migrate database: %w", err)
-	}
-	return nil
-}
-
-// lastIndexedAt queries the timestamp of the last completed photo indexing operation.
-func (s *Server) lastIndexedAt(ctx context.Context) (*time.Time, error) {
-	var lastIndexedAt time.Time
-	err := s.pool.QueryRow(ctx, "SELECT last_indexed_at FROM index_state WHERE id = TRUE").Scan(&lastIndexedAt)
-	if err == nil {
-		return &lastIndexedAt, nil
-	}
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("get last indexed time: %w", err)
-}
-
-// recordIndexedAt updates or inserts the timestamp of the latest successful indexing run.
-func (s *Server) recordIndexedAt(ctx context.Context, indexedAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO index_state (id, last_indexed_at) VALUES (TRUE, $1)
-		ON CONFLICT (id) DO UPDATE SET last_indexed_at = EXCLUDED.last_indexed_at`, indexedAt)
-	if err != nil {
-		slog.Error("record indexed time", "error", err)
-		return fmt.Errorf("record indexed time: %w", err)
-	}
-	return nil
-}
-
 // home renders the root homepage showing the latest month's photo timeline.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
-	months, err := s.months(r.Context())
+	months, err := s.db.Months(r.Context())
 	if err != nil {
 		slog.Error("Failed to load months", "error", err)
 		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
@@ -365,7 +262,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	selectedMonth := ""
 	if len(months) > 0 {
 		selectedMonth = months[0].Key
-		photos, err = s.photosForMonth(r.Context(), months[0].Key)
+		photos, err = s.db.PhotosForMonth(r.Context(), months[0].Key)
 		if err != nil {
 			slog.Error("Failed to load photos for month", "month", months[0].Key, "error", err)
 			http.Error(w, "Could not load photos", http.StatusInternalServerError)
@@ -385,13 +282,13 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	months, err := s.months(r.Context())
+	months, err := s.db.Months(r.Context())
 	if err != nil {
 		slog.Error("Failed to load months", "error", err)
 		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
 		return
 	}
-	photos, err := s.photosForMonth(r.Context(), month)
+	photos, err := s.db.PhotosForMonth(r.Context(), month)
 	if err != nil {
 		slog.Error("Failed to load photos for month", "month", month, "error", err)
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
@@ -408,7 +305,7 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	photo, err := s.photoByID(r.Context(), id)
+	photo, err := s.db.PhotoByID(r.Context(), id)
 	if err != nil {
 		slog.Error("Failed to load photo", "id", id, "error", err)
 		http.NotFound(w, r)
@@ -425,7 +322,7 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previousID, nextID := adjacentPhotoIDs(collection, id)
-	galleries, err := s.collections(r.Context())
+	galleries, err := s.db.Collections(r.Context())
 	if err != nil {
 		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
@@ -497,7 +394,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		slog.Info("No search criteria provided")
 	} else {
 		var err error
-		photos, err = s.searchPhotos(r.Context(), search)
+		photos, err = s.db.SearchPhotos(r.Context(), search)
 		if err != nil {
 			slog.Error("Failed to search photos", "error", err)
 			http.Error(w, "Could not search photos", http.StatusInternalServerError)
@@ -505,33 +402,33 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var err error
-	if search.CameraModels, err = s.distinctValues(r.Context(), `SELECT DISTINCT camera_model FROM photos WHERE camera_model IS NOT NULL AND camera_model <> '' ORDER BY camera_model`); err != nil {
+	if search.CameraModels, err = s.db.CameraModels(r.Context()); err != nil {
 		slog.Error("Failed to load camera models", "error", err)
 		http.Error(w, "Could not load camera models", http.StatusInternalServerError)
 		return
 	}
-	if search.Locations, err = s.searchLocations(r.Context()); err != nil {
+	if search.Locations, err = s.db.SearchLocations(r.Context()); err != nil {
 		slog.Error("Failed to load locations", "error", err)
 		http.Error(w, "Could not load locations", http.StatusInternalServerError)
 		return
 	}
-	if search.FocalLengths, err = s.distinctValues(r.Context(), `SELECT DISTINCT focal_length::text FROM photos WHERE focal_length IS NOT NULL ORDER BY focal_length`); err != nil {
+	if search.FocalLengths, err = s.db.FocalLengths(r.Context()); err != nil {
 		slog.Error("Failed to load focal lengths", "error", err)
 		http.Error(w, "Could not load focal lengths", http.StatusInternalServerError)
 		return
 	}
-	if search.Labels, err = s.distinctValues(r.Context(), `SELECT DISTINCT unnest(objects) FROM photos ORDER BY 1`); err != nil {
+	if search.Labels, err = s.db.Labels(r.Context()); err != nil {
 		slog.Error("Failed to load labels", "error", err)
 		http.Error(w, "Could not load labels", http.StatusInternalServerError)
 		return
 	}
-	if search.Colors, err = s.distinctValues(r.Context(), `SELECT DISTINCT unnest(dominant_colors) FROM photos ORDER BY 1`); err != nil {
+	if search.Colors, err = s.db.Colors(r.Context()); err != nil {
 		slog.Error("Failed to load colors", "error", err)
 		http.Error(w, "Could not load colors", http.StatusInternalServerError)
 		return
 	}
 
-	galleries, err := s.collections(r.Context())
+	galleries, err := s.db.Collections(r.Context())
 	if err != nil {
 		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
@@ -571,11 +468,11 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 	switch {
 	case galleryURL.Path == "/":
 		slog.Info("Loading timeline", "query", galleryURL.Query())
-		months, err := s.months(ctx)
+		months, err := s.db.Months(ctx)
 		if err != nil || len(months) == 0 {
 			return "/", "Timeline", nil, err
 		}
-		photos, err := s.photosForMonth(ctx, months[0].Key)
+		photos, err := s.db.PhotosForMonth(ctx, months[0].Key)
 		return "/", monthLabel(months[0].Key), photos, err
 	case strings.HasPrefix(galleryURL.Path, "/timeline/"):
 		slog.Info("Loading timeline month", "month", galleryURL.Path)
@@ -586,7 +483,7 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		if !validMonth(month) {
 			return "", "", nil, errors.New("invalid timeline month")
 		}
-		photos, err := s.photosForMonth(ctx, month)
+		photos, err := s.db.PhotosForMonth(ctx, month)
 		return galleryURL.RequestURI(), monthLabel(month), photos, err
 	case galleryURL.Path == "/cluster":
 		slog.Info("Loading map cluster", "query", galleryURL.Query())
@@ -599,9 +496,8 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 			slog.Error("Invalid collection ID", "collectionId", galleryURL.Path, "error", err)
 			return "", "", nil, errors.New("invalid collection")
 		}
-		photos, err := s.photosForCollection(ctx, collectionID)
-		var name string
-		err = s.pool.QueryRow(ctx, `SELECT name from collections WHERE id = $1`, collectionID).Scan(&name)
+		photos, err := s.db.PhotosForCollection(ctx, collectionID)
+		name, err := s.db.CollectionName(ctx, collectionID)
 		if err != nil {
 			slog.Error("Failed to load collection name", "collectionId", collectionID, "error", err)
 		}
@@ -632,7 +528,7 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		} else if search.Location != "" {
 			return "", "", nil, errors.New("invalid location filter")
 		}
-		photos, err := s.searchPhotos(ctx, search)
+		photos, err := s.db.SearchPhotos(ctx, search)
 		return galleryURL.RequestURI(), "Search results", photos, err
 	default:
 		slog.Error("Unsupported collection URL", "url", galleryURL.Path)
@@ -660,81 +556,13 @@ func adjacentPhotoIDs(photos []Photo, currentID int64) (int64, int64) {
 
 // maintenance renders the system management page for indexing control and status monitoring.
 func (s *Server) maintenance(w http.ResponseWriter, r *http.Request) {
-	galleries, err := s.collections(r.Context())
+	galleries, err := s.db.Collections(r.Context())
 	if err != nil {
 		slog.Error("Failed to load galleries", "error", err)
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
 	s.render(w, "maintenance", PageData{Page: "maintenance", Collections: galleries})
-}
-
-// distinctValues executes a SQL query returning a slice of distinct string column values.
-func (s *Server) distinctValues(ctx context.Context, query string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
-	defer rows.Close()
-	var values []string
-	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	return values, rows.Err()
-}
-
-// searchLocations loads distinct settlement and region filter choices for the search view.
-func (s *Server) searchLocations(ctx context.Context) ([]SearchLocation, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT 'settlement:' || settlement, settlement,
-		concat_ws(', ', settlement, region, country), settlement, region
-		FROM photos WHERE settlement IS NOT NULL AND settlement <> ''
-		UNION
-		SELECT DISTINCT 'region:' || region, region, concat_ws(', ', region, country), '', region
-		FROM photos WHERE region IS NOT NULL AND region <> ''
-	ORDER BY 3`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var locations []SearchLocation
-	for rows.Next() {
-		var location SearchLocation
-		var rawValue string
-		if err := rows.Scan(&location.Value, &rawValue, &location.Label, &location.Settlement, &location.Region); err != nil {
-			return nil, err
-		}
-		locations = append(locations, location)
-	}
-	return locations, rows.Err()
-}
-
-// searchPhotos queries the photos table with dynamic filters defined in SearchData.
-func (s *Server) searchPhotos(ctx context.Context, search SearchData) ([]Photo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''),
-		camera_model, focal_length, flash_fired, objects, dominant_colors
-		FROM photos
-		WHERE ($1 = '' OR taken_at >= $1::date)
-		AND ($2 = '' OR taken_at < ($2::date + INTERVAL '1 day'))
-		AND ($3 = '' OR $3 = ANY(objects))
-		AND ($4 = '' OR camera_model = $4)
-		AND ($5 = '' OR focal_length = NULLIF($5, '')::double precision)
-		AND ($6 = '' OR ($6 = 'yes' AND flash_fired = TRUE) OR ($6 = 'no' AND flash_fired = FALSE))
-		AND ($7 = '' OR settlement = $7)
-		AND ($8 = '' OR region = $8)
-		AND ($9 = '' OR $9 = ANY(dominant_colors))
-		ORDER BY taken_at ASC, id ASC`,
-		search.DateFrom, search.DateTo, search.Label, search.CameraModel,
-		search.FocalLength, search.Flash, search.Settlement, search.Region, search.Color)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectPhotos(rows)
 }
 
 // month renders the photo grid HTML template partial for a given month.
@@ -745,7 +573,7 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid month", http.StatusBadRequest)
 		return
 	}
-	photos, err := s.photosForMonth(r.Context(), month)
+	photos, err := s.db.PhotosForMonth(r.Context(), month)
 	if err != nil {
 		slog.Error("Failed to load photos for month", "month", month, "error", err)
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
@@ -768,7 +596,7 @@ func (s *Server) thisweek(w http.ResponseWriter, r *http.Request) {
 
 // locations renders the interactive Leaflet map and location selection sidebar.
 func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
-	locationGroups, err := s.locationGroups(r.Context())
+	locationGroups, err := s.db.LocationGroups(r.Context())
 	if err != nil {
 		slog.Error("Failed to load locations", "error", err)
 		http.Error(w, "Could not load locations", http.StatusInternalServerError)
@@ -779,7 +607,7 @@ func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 	selectedRegion := r.URL.Query().Get("region")
 	var bounds *MapBounds
 	if selectedSettlement != "" || selectedRegion != "" {
-		bounds, err = s.locationBounds(r.Context(), selectedSettlement, selectedRegion)
+		bounds, err = s.db.LocationBounds(r.Context(), selectedSettlement, selectedRegion)
 		if err != nil {
 			slog.Error("Failed to load location bounds", "settlement", selectedSettlement, "region", selectedRegion, "error", err)
 			http.Error(w, "Could not load location bounds", http.StatusInternalServerError)
@@ -804,42 +632,6 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 		mapReturnURL = "/locations"
 	}
 	s.render(w, "cluster", PageData{Page: "cluster", Photos: photos, ReturnURL: r.URL.RequestURI(), MapReturnURL: mapReturnURL})
-}
-
-// locationGroups queries all distinct settlement and region names with photo counts.
-func (s *Server) locationGroups(ctx context.Context) ([]LocationGroup, error) {
-	rows, err := s.pool.Query(ctx, `SELECT 'settlement', settlement, COUNT(*)::int FROM photos
-		WHERE settlement IS NOT NULL AND settlement <> '' GROUP BY settlement
-		UNION ALL
-		SELECT 'region', region, COUNT(*)::int FROM photos
-		WHERE region IS NOT NULL AND region <> '' GROUP BY region
-	ORDER BY 2`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var groups []LocationGroup
-	for rows.Next() {
-		var group LocationGroup
-		if err := rows.Scan(&group.Kind, &group.Name, &group.Count); err != nil {
-			return nil, err
-		}
-		groups = append(groups, group)
-	}
-	return groups, rows.Err()
-}
-
-// locationBounds calculates geographical bounding box coordinates for photos matching settlement or region filters.
-func (s *Server) locationBounds(ctx context.Context, settlement, region string) (*MapBounds, error) {
-	var bounds MapBounds
-	err := s.pool.QueryRow(ctx, `SELECT MIN(latitude), MIN(longitude), MAX(latitude), MAX(longitude)
-		FROM photos WHERE ($1 = '' OR settlement = $1) AND ($2 = '' OR region = $2)
-		AND latitude IS NOT NULL AND longitude IS NOT NULL`, settlement, region).
-		Scan(&bounds.MinLatitude, &bounds.MinLongitude, &bounds.MaxLatitude, &bounds.MaxLongitude)
-	if err != nil {
-		return nil, err
-	}
-	return &bounds, nil
 }
 
 // mapPoints responds with JSON spatial cluster points aggregated by map grid cells for the current zoom level.
@@ -881,34 +673,10 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 	cellSize := 360 / math.Pow(2, float64(zoom+2))
 	settlement := query.Get("settlement")
 	region := query.Get("region")
-	rows, err := s.pool.Query(r.Context(), `SELECT AVG(latitude), AVG(longitude), COUNT(*)::int, MIN(id),
-		MIN(latitude), MIN(longitude), MAX(latitude), MAX(longitude)
-		FROM photos
-		WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
-		AND ($6 = '' OR settlement = $6) AND ($7 = '' OR region = $7)
-		GROUP BY floor((latitude + 90) / $5::double precision), floor((longitude + 180) / $5::double precision)
-		ORDER BY MIN(id) LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude, cellSize, settlement, region)
+	points, err := s.db.MapPoints(r.Context(), minLatitude, maxLatitude, minLongitude, maxLongitude, cellSize, settlement, region)
 	if err != nil {
 		slog.Error("Failed to load map points", "minLat", minLatitude, "maxLat", maxLatitude,
 			"minLng", minLongitude, "maxLng", maxLongitude, "zoom", zoom, "settlement", settlement, "region", region, "error", err)
-		http.Error(w, "Could not load map points", http.StatusInternalServerError)
-		return
-	}
-
-	defer rows.Close()
-	points := make([]mapPoint, 0)
-	for rows.Next() {
-		var point mapPoint
-		if err := rows.Scan(&point.Latitude, &point.Longitude, &point.Count, &point.PhotoID,
-			&point.MinLatitude, &point.MinLongitude, &point.MaxLatitude, &point.MaxLongitude); err != nil {
-			slog.Error("Failed to scan map point", "error", err)
-			http.Error(w, "Could not load map points", http.StatusInternalServerError)
-			return
-		}
-		points = append(points, point)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Error("Error iterating map points", "error", err)
 		http.Error(w, "Could not load map points", http.StatusInternalServerError)
 		return
 	}
@@ -947,32 +715,11 @@ func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid cluster maximum longitude", http.StatusBadRequest)
 		return
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT id, latitude, longitude, path,
-		to_char(taken_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), COALESCE(location, '')
-		FROM photos
-		WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
-		ORDER BY taken_at ASC, id ASC LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude)
+	photos, err := s.db.ClusterPoints(r.Context(), minLatitude, maxLatitude, minLongitude, maxLongitude)
 	if err != nil {
 		slog.Error("Failed to load cluster photos", "minLat", minLatitude, "maxLat", maxLatitude,
 			"minLng", minLongitude, "maxLng", maxLongitude, "error", err)
 		http.Error(w, "Could not load cluster photos", http.StatusInternalServerError)
-		return
-	}
-
-	defer rows.Close()
-	photos := make([]mapPoint, 0)
-	for rows.Next() {
-		var photo mapPoint
-		if err := rows.Scan(&photo.PhotoID, &photo.Latitude, &photo.Longitude, &photo.Path, &photo.TakenAt, &photo.Location); err != nil {
-			slog.Error("Failed to scan cluster photo", "error", err)
-			http.Error(w, "Could not read cluster photos", http.StatusInternalServerError)
-			return
-		}
-		photos = append(photos, photo)
-	}
-	if err := rows.Err(); err != nil {
-		slog.Error("Error iterating cluster photos", "error", err)
-		http.Error(w, "Could not read cluster photos", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=30")
@@ -989,16 +736,7 @@ func (s *Server) clusterPhotos(ctx context.Context, query url.Values) ([]Photo, 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''),
-		camera_model, focal_length, flash_fired, objects, dominant_colors
-		FROM photos
-		WHERE latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4
-		ORDER BY taken_at ASC, id ASC LIMIT 10000`, minLatitude, maxLatitude, minLongitude, maxLongitude)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectPhotos(rows)
+	return s.db.PhotosInBounds(ctx, minLatitude, maxLatitude, minLongitude, maxLongitude)
 }
 
 // clusterBounds parses bounding box coordinate query parameters minLat, maxLat, minLng, maxLng.
@@ -1025,7 +763,7 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 /*
 // galleriesPage renders the custom galleries list page or redirects to the first gallery.
 func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
-	collections, err := s.collections(r.Context())
+	collections, err := s.db.Collections(r.Context())
 	if err != nil {
 		slog.Error("Failed to load collections", "error", err)
 		http.Error(w, "Could not load collections", http.StatusInternalServerError)
@@ -1044,7 +782,7 @@ func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
 // gallery renders the detail grid page for a collection
 func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
 	//if we have no collections yet just render the page - the template will take care of it
-	collections, err := s.collections(r.Context())
+	collections, err := s.db.Collections(r.Context())
 
 	if err != nil {
 		slog.Error("Failed to load collections", "error", err)
@@ -1064,15 +802,13 @@ func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, fmt.Sprintf("/collection/%d", collections[0].ID), http.StatusSeeOther)
 		return
 	}
-	var collection Collection 
-	if err := s.pool.QueryRow(r.Context(), `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		from collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
-		WHERE g.id = $1 GROUP BY g.id`, id).Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
+	collection, err := s.db.CollectionByID(r.Context(), id)
+	if err != nil {
 		slog.Error("Failed to load collection", "collection_id", id, "error", err)
 		http.NotFound(w, r)
 		return
 	}
-	photos, err := s.photosForCollection(r.Context(), id)
+	photos, err := s.db.PhotosForCollection(r.Context(), id)
 	if err != nil {
 		slog.Error("Failed to load collection photos", "collection_id", id, "error", err)
 		http.Error(w, "Could not load collection", http.StatusInternalServerError)
@@ -1095,15 +831,19 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	tag, err := s.pool.Exec(r.Context(), `INSERT INTO collection_photos (collection_id, photo_id)
-		SELECT $1, id FROM photos WHERE id = ANY(string_to_array($2, ',')::bigint[])
-		ON CONFLICT DO NOTHING`, galleryID, ids)
+	photoIDs, err := parseIDList(ids)
+	if err != nil {
+		slog.Error("Invalid photo IDs provided for gallery addition", "ids", ids, "error", err)
+		http.Error(w, "Invalid photo selection", http.StatusBadRequest)
+		return
+	}
+	added, err := s.db.AddPhotosToCollection(r.Context(), galleryID, photoIDs)
 	if err != nil {
 		slog.Error("Failed to add photos to gallery", "collection_id", galleryID, "error", err)
 		http.Error(w, "Could not add photos to gallery", http.StatusInternalServerError)
 		return
 	}
-	if tag.RowsAffected() == 0 {
+	if added == 0 {
 		slog.Error("No selected photos could be added to the gallery", "collection_id", galleryID)
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
@@ -1125,8 +865,13 @@ func (s *Server) removeFromCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_, err = s.pool.Exec(r.Context(), `DELETE FROM collection_photos WHERE collection_id = $1
-		AND photo_ id = ANY(string_to_array($2, ',')::bigint[])`, galleryID, ids)
+	photoIDs, err := parseIDList(ids)
+	if err != nil {
+		slog.Error("Invalid photo IDs provided for gallery deletion", "ids", ids, "error", err)
+		http.Error(w, "Invalid photo selection", http.StatusBadRequest)
+		return
+	}
+	err = s.db.RemovePhotosFromCollection(r.Context(), galleryID, photoIDs)
 	if err != nil {
 		slog.Error("Failed to remove photos from gallery", "collection_id", galleryID, "error", err)
 		http.Error(w, "Could not remove photos from gallery", http.StatusInternalServerError)
@@ -1145,15 +890,8 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_, err = s.pool.Exec(r.Context(), `DELETE FROM collections WHERE id = $1`, galleryID)
-	if err != nil {
+	if err := s.db.DeleteCollection(r.Context(), galleryID); err != nil {
 		slog.Error("Failed to delete collection", "collection_id", galleryID, "error", err)
-		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
-		return
-	}
-	_, err = s.pool.Exec(r.Context(), `DELETE FROM collection_photos WHERE collection_id = $1`, galleryID)
-	if err != nil {
-		slog.Error("Failed to delete photos from collection", "collection_id", galleryID, "error", err)
 		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
 		return
 	}
@@ -1169,8 +907,8 @@ func (s *Server) selectCollection(ctx context.Context, existingID, name string) 
 			slog.Error("Invalid collection ID provided", "collection_id", existingID, "error", err)
 			return 0, fmt.Errorf("invalid collection")
 		}
-		var found bool
-		if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 from collections WHERE id = $1)", id).Scan(&found); err != nil {
+		found, err := s.db.CollectionExists(ctx, id)
+		if err != nil {
 			slog.Error("Failed to look up collection existence", "collection_id", id, "error", err)
 			return 0, fmt.Errorf("look up collections: %w", err)
 		}
@@ -1189,8 +927,8 @@ func (s *Server) selectCollection(ctx context.Context, existingID, name string) 
 		slog.Error("Collection name exceeds maximum length of 200 characters", "collection_name_length", len(name))
 		return 0, fmt.Errorf("collection name must be 200 characters or fewer")
 	}
-	var id int64
-	if err := s.pool.QueryRow(ctx, "INSERT INTO collections (name) VALUES ($1) RETURNING id", name).Scan(&id); err != nil {
+	id, err := s.db.CreateCollection(ctx, name)
+	if err != nil {
 		slog.Error("Failed to create new collection", "collection_name", name, "error", err)
 		return 0, fmt.Errorf("create collection: %w", err)
 	}
@@ -1316,8 +1054,7 @@ func percentage(processed, total int) int {
 // photoFile serves full-size photo image files from disk.
 func (s *Server) photoFile(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/photos/")
-	var path string
-	err := s.pool.QueryRow(r.Context(), "SELECT path FROM photos WHERE id = $1", id).Scan(&path)
+	path, err := s.db.PhotoPath(r.Context(), id)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -1328,8 +1065,8 @@ func (s *Server) photoFile(w http.ResponseWriter, r *http.Request) {
 // rawFile serves raw camera photo files as attachment downloads.
 func (s *Server) rawFile(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/raw/")
-	var rawPath string
-	if err := s.pool.QueryRow(r.Context(), "SELECT raw_path FROM photos WHERE id = $1", id).Scan(&rawPath); err != nil || rawPath == "" {
+	rawPath, err := s.db.PhotoRawPath(r.Context(), id)
+	if err != nil || rawPath == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -1363,9 +1100,7 @@ func (s *Server) rawFile(w http.ResponseWriter, r *http.Request) {
 // thumbnailFile serves cached 400px JPEG thumbnails for photos.
 func (s *Server) thumbnailFile(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/thumbnails/")
-	var thumbnail []byte
-	var path string
-	err := s.pool.QueryRow(r.Context(), "SELECT thumbnail, path FROM photos WHERE id = $1", id).Scan(&thumbnail, &path)
+	thumbnail, path, err := s.db.PhotoThumbnail(r.Context(), id)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -1386,20 +1121,11 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 
 	//get the ids from the ids query parameter, e.g., /download/abc123?ids=1,2,3 would have ids "1,2,3"
 	//and confirm each entry is an integer, otherwise return a 400 error
-	photoIDs := strings.Split(r.URL.Query().Get("ids"), ",")
-
-	if len(photoIDs) == 0 {
-		slog.Error("Download request rejected because no photo ids were provided","ids", r.URL.Query().Get("ids"))
-		http.Error(w, "No photo ids provided", http.StatusBadRequest)
+	photoIDs, err := parseIDList(r.URL.Query().Get("ids"))
+	if err != nil {
+		slog.Error("Download request rejected because of invalid photo ids: ", "ids", r.URL.Query().Get("ids"), "err", err)
+		http.Error(w, "Invalid photo ids", http.StatusBadRequest)
 		return
-	}
-
-	for _, id := range photoIDs {
-		if _, err := strconv.Atoi(id); err != nil {
-			slog.Error("Download request rejected because of invalid photo id: ", "id", id, "err", err)
-			http.Error(w, "Invalid photo id: "+id, http.StatusBadRequest)
-			return
-		}
 	}
 
 
@@ -1407,14 +1133,12 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	includeRaw := r.URL.Query().Get("raw") == "true"
 
 	//get the path and rawpath of all the photos in the collection
-	rows, err := s.pool.Query(r.Context(), "SELECT path, COALESCE(raw_path, '') FROM photos where id = ANY($1)", photoIDs)
-
+	files, err := s.db.PhotoFilePaths(r.Context(), photoIDs)
 	if err != nil {
 		slog.Error("Download request rejected because of database query error: ", "err", err)
 		http.Error(w, "Invalid selection", http.StatusBadRequest)
 		return
 	}
-	defer rows.Close()
 	w.Header().Set("Content-Type", "application/zip")
 
 	//create a filename with the date-time of the request, e.g., fast-fotos-selection-2023-08-15-150405.zip
@@ -1423,17 +1147,26 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	archive := zip.NewWriter(w)
 	defer archive.Close()
-	for rows.Next() {
-		var path, rawPath string
-		if err := rows.Scan(&path, &rawPath); err != nil {
-			return
-		}
-		if err := s.addDownloadFiles(archive, path, rawPath, includeRaw); err != nil {
+	for _, file := range files {
+		if err := s.addDownloadFiles(archive, file.Path, file.RawPath, includeRaw); err != nil {
 			slog.Error("Download request failed while adding files to archive: ", "err", err)
 			http.Error(w, "Could not create download", http.StatusInternalServerError)
 			return
 		}
 	}
+}
+
+// parseIDList parses a comma-separated list of positive integer IDs.
+func parseIDList(value string) ([]int64, error) {
+	var ids []int64
+	for _, part := range strings.Split(value, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err != nil || id < 1 {
+			return nil, fmt.Errorf("invalid photo id %q", part)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // addDownloadFiles adds an image, its sidecar files (.xmp, .json), and optional raw file to a zip archive.
@@ -1483,37 +1216,7 @@ func addFileToArchive(archive *zip.Writer, root, relativePath string) error {
 	return err
 }
 
-// months queries all distinct photo capture months with total photo counts.
-func (s *Server) months(ctx context.Context) ([]Month, error) {
-	rows, err := s.pool.Query(ctx, `SELECT to_char(date_trunc('month', taken_at), 'YYYY-MM'), COUNT(*)::int
-		FROM photos GROUP BY 1 ORDER BY 1 DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var months []Month
-	for rows.Next() {
-		var month Month
-		if err := rows.Scan(&month.Key, &month.Count); err != nil {
-			return nil, err
-		}
-		months = append(months, month)
-	}
-	return months, rows.Err()
-}
-
-// photosForMonth queries all photos captured within a specific calendar month key (YYYY-MM).
-func (s *Server) photosForMonth(ctx context.Context, month string) ([]Photo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors FROM photos
-		WHERE taken_at >= $1::date AND taken_at < ($1::date + INTERVAL '1 month') ORDER BY taken_at ASC`, month+"-01")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return collectPhotos(rows)
-}
-
-// photosForThisWeek queries all photos captured within a specific calendar month key (YYYY-MM).
+// photosForThisWeek loads photos captured within three days of today in any year.
 func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 
 	//get the day of year for the current date
@@ -1526,126 +1229,12 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 
 	//get all the photo ids where day_of_year field is bettween startOfWeek and endOfWeek
 	//and put them in an array
-	rows, err := s.pool.Query(ctx, `SELECT id FROM photos where day_of_year > $1 AND day_of_year <= $2 ORDER BY taken_at ASC`, startOfWeek, endOfWeek)
-
+	photoIDs, err := s.db.PhotoIDsForDayRange(ctx, startOfWeek, endOfWeek)
 	if err != nil {
 		slog.Error("Error querying photos for this week: ", "err", err)
 		return nil, err
 	}
-
-	defer rows.Close()
-	photoIDs := []int64{}
-
-	for rows.Next() {
-		var id int64
-		err := rows.Scan(&id)
-
-		if err != nil {
-			slog.Error("Error scanning photo id for this week: ", "err", err)
-		} else {
-			photoIDs = append(photoIDs, id)
-		}
-	}
-	return collectPhotosByIDs(ctx, s.pool, photoIDs)
-}
-
-
-// galleries queries all user-created galleries and their photo counts.
-func (s *Server) collections(ctx context.Context) ([]Collection, error) {
-	rows, err := s.pool.Query(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)::int
-		from collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
-		GROUP BY g.id ORDER BY g.name ASC`)
-	if err != nil {
-		slog.Error("Error querying collections: ", "err", err)
-		return nil, err
-	}
-	defer rows.Close()
-	var collections []Collection
-	for rows.Next() {
-		var collection Collection 
-		if err := rows.Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
-			return nil, err
-		}
-		collections = append(collections, collection)
-	}
-	return collections, rows.Err()
-}
-
-// photosForCollection queries all photos assigned to a specific custom gallery ID.
-func (s *Server) photosForCollection(ctx context.Context, galleryID int64) ([]Photo, error) {
-	rows, err := s.pool.Query(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors FROM photos p
-		JOIN collection_photos gp ON gp.photo_id = p.id WHERE gp.collection_id = $1 ORDER BY p.taken_at ASC`, galleryID)
-	if err != nil {
-		slog.Error("Error querying photos for collection: ", "err", err)
-		return nil, err
-	}
-
-	defer rows.Close()
-	return collectPhotos(rows)
-}
-
-// photoByID loads a single Photo record by its database primary key ID.
-func (s *Server) photoByID(ctx context.Context, id int64) (Photo, error) {
-	//put the id into an array of ints and pass it to collectPhotosByIDs to get the photo
-	photos, err := collectPhotosByIDs(ctx, s.pool, []int64{id})
-	if err != nil || len(photos) != 1 {
-		if err != nil {
-			slog.Error("Error collecting photo by ID: ", "err", err)
-			return Photo{}, err
-		}
-		return Photo{}, err
-	}
-	return photos[0], nil
-}
-
-// photoRows abstracts pgx database row iteration for photo queries.
-type photoRows interface {
-	Next() bool
-	Scan(...any) error
-	Err() error
-}
-
-//collectPhotosByIDs queries multiple photos by their database primary key IDs and returns a slice of Photo structs.
-func collectPhotosByIDs(ctx context.Context, pool *pgxpool.Pool, ids []int64) ([]Photo, error) {
-	var photos []Photo
-	if len(ids) == 0 {
-		slog.Warn("collectPhotosByIDs called with empty ids slice")
-		return nil, nil
-	}
-	
-	//get all of the photos with the given ids
-	rows, err := pool.Query(ctx, `SELECT id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''), camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, day_of_year FROM photos WHERE id = ANY($1)`, ids)
-
-	if err != nil {
-		slog.Error("Error querying photos by IDs: ", "err", err)
-		return nil, err
-	}
-
-	for rows.Next() {
-		var photo Photo
-		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors, &photo.MediaType, &photo.DayOfYear); err != nil {
-			slog.Error("Error scanning photo row: ", "err", err)
-			return nil, err
-		}
-		photos = append(photos, photo)
-	}
-	return photos, rows.Err()
-}
-
-
-
-// collectPhotos scans database query result rows into a slice of Photo structs.
-func collectPhotos(rows photoRows) ([]Photo, error) {
-	var photos []Photo
-	for rows.Next() {
-		var photo Photo
-		if err := rows.Scan(&photo.ID, &photo.Path, &photo.RawPath, &photo.TakenAt, &photo.Latitude, &photo.Longitude, &photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &photo.Objects, &photo.DominantColors); err != nil {
-			slog.Error("Error scanning photo row: ", "err", err)
-			return nil, err
-		}
-		photos = append(photos, photo)
-	}
-	return photos, rows.Err()
+	return s.db.PhotosByIDs(ctx, photoIDs)
 }
 
 // render executes a named HTML template with PageData context and writes the output response.

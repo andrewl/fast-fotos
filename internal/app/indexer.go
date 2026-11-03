@@ -40,7 +40,7 @@ var rawExtensions = map[string]bool{
 
 // reindexPhotos clears existing photo index state and performs a complete re-index of all photo paths.
 func (s *Server) reindexPhotos(ctx context.Context) (int, error) {
-	if _, err := s.pool.Exec(ctx, "DELETE FROM index_state"); err != nil {
+	if err := s.db.ClearIndexState(ctx); err != nil {
 		return 0, fmt.Errorf("clear index state: %w", err)
 	}
 	reindexStartedAt := time.Now().UTC()
@@ -48,7 +48,7 @@ func (s *Server) reindexPhotos(ctx context.Context) (int, error) {
 	if err != nil {
 		return count, err
 	}
-	if _, err := s.pool.Exec(ctx, "DELETE FROM photos WHERE indexed_at < $1", reindexStartedAt); err != nil {
+	if err := s.db.DeleteStalePhotos(ctx, reindexStartedAt); err != nil {
 		return count, fmt.Errorf("remove stale photos: %w", err)
 	}
 	return count, nil
@@ -56,7 +56,7 @@ func (s *Server) reindexPhotos(ctx context.Context) (int, error) {
 
 // indexPhotos performs an incremental index of new or updated photos since the last index timestamp.
 func (s *Server) indexPhotos(ctx context.Context) (int, error) {
-	lastIndexedAt, err := s.lastIndexedAt(ctx)
+	lastIndexedAt, err := s.db.LastIndexedAt(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -125,10 +125,10 @@ func (s *Server) indexPhotoPaths(ctx context.Context, modifiedSince *time.Time, 
 	if err := ctx.Err(); err != nil {
 		return count, err
 	}
-	if err := s.deriveNearbyLocations(ctx); err != nil {
+	if err := s.db.DeriveNearbyLocations(ctx); err != nil {
 		return count, fmt.Errorf("derive nearby locations: %w", err)
 	}
-	if err := s.recordIndexedAt(ctx, indexStartedAt); err != nil {
+	if err := s.db.RecordIndexedAt(ctx, indexStartedAt); err != nil {
 		return count, err
 	}
 	return count, nil
@@ -220,34 +220,18 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 	if dominantColors == nil {
 		dominantColors = []string{}
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var photoID int64
 	locationSource := ""
 	if location != "" {
 		locationSource = "extracted"
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19, $20) ON CONFLICT (path) DO UPDATE
-		SET taken_at = EXCLUDED.taken_at, latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude,
-		raw_path = EXCLUDED.raw_path, thumbnail = COALESCE(EXCLUDED.thumbnail, photos.thumbnail), location = EXCLUDED.location, location_source = EXCLUDED.location_source,
-			settlement = EXCLUDED.settlement, region = EXCLUDED.region, country = EXCLUDED.country,
-			camera_model = EXCLUDED.camera_model, focal_length = EXCLUDED.focal_length,
-			flash_fired = EXCLUDED.flash_fired, objects = EXCLUDED.objects, dominant_colors = EXCLUDED.dominant_colors,
-			media_type = EXCLUDED.media_type, duration_seconds = EXCLUDED.duration_seconds, indexed_at = EXCLUDED.indexed_at, day_of_year = EXCLUDED.day_of_year
-		RETURNING id`,
-		relativePath, rawRelativePath, takenAt, latitude, longitude, thumbnail, location, locationSource, settlement, region, country,
-		cameraModel, focalLength, flashFired, labels, dominantColors, mediaType, durationSeconds, indexStartedAt, dayOfYear).Scan(&photoID)
-	if err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	return nil
+	return s.db.UpsertPhoto(ctx, PhotoRecord{
+		Path: relativePath, RawPath: rawRelativePath, TakenAt: takenAt, Latitude: latitude, Longitude: longitude,
+		Thumbnail: thumbnail, Location: location, LocationSource: locationSource,
+		Settlement: settlement, Region: region, Country: country,
+		CameraModel: cameraModel, FocalLength: focalLength, FlashFired: flashFired,
+		Objects: labels, DominantColors: dominantColors, MediaType: mediaType,
+		DurationSeconds: durationSeconds, IndexedAt: indexStartedAt, DayOfYear: dayOfYear,
+	})
 }
 
 // photoPaths traverses root directory and returns all supported photo file paths.
@@ -356,40 +340,6 @@ func readMetadata(path string) (time.Time, *float64, *float64, string, *float64,
 	}
 
 	return takenAt, nil, nil, cameraModel, focalLength, flashFired, nil
-}
-
-// deriveNearbyLocations populates location data for un-geotagged photos taken within 1 hour of a geotagged photo.
-func (s *Server) deriveNearbyLocations(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `
-		WITH ranked_sources AS (
-			SELECT target.id AS target_id,
-				source.latitude, source.longitude, source.location,
-				source.settlement, source.region, source.country,
-				ROW_NUMBER() OVER (
-					PARTITION BY target.id
-					ORDER BY ABS(EXTRACT(EPOCH FROM (source.taken_at - target.taken_at))), source.id
-				) AS rank
-			FROM photos AS target
-			JOIN photos AS source
-				ON source.id <> target.id
-				AND source.location IS NOT NULL AND source.location <> ''
-				AND source.location_source = 'extracted'
-				AND source.latitude IS NOT NULL AND source.longitude IS NOT NULL
-				AND source.latitude <> 0 AND source.longitude <> 0
-				AND source.taken_at BETWEEN target.taken_at - INTERVAL '1 hour'
-					AND target.taken_at + INTERVAL '1 hour'
-			WHERE (target.location IS NULL OR target.location = ''
-					OR target.latitude IS NULL OR target.longitude IS NULL
-					OR target.latitude = 0 OR target.longitude = 0)
-				AND target.location_source IS DISTINCT FROM 'extracted'
-		)
-		UPDATE photos AS target
-		SET latitude = source.latitude, longitude = source.longitude,
-			location = source.location, location_source = 'derived',
-			settlement = source.settlement, region = source.region, country = source.country
-		FROM ranked_sources AS source
-		WHERE source.rank = 1 AND source.target_id = target.id`)
-	return err
 }
 
 // createThumbnail generates a JPEG thumbnail byte buffer resized to fit within thumbnailMaxDimension.

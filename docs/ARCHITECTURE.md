@@ -1,7 +1,7 @@
 # Architecture and Roadmap
 
 Fast Fotos is a single-process Go web application for browsing a read-only photo
-library. PostgreSQL stores the index, thumbnails, and custom-gallery memberships;
+library. SQLite stores the index, thumbnails, and custom-gallery memberships;
 the original files remain under `PHOTO_ROOT`.
 
 ## Running the application
@@ -10,7 +10,7 @@ The `fast-fotos` executable reads:
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `DATABASE_URL` | Yes | - | PostgreSQL connection string |
+| `DATABASE_PATH` | No | `fast-fotos.db` | SQLite database file path |
 | `PHOTO_ROOT` | Yes | - | Absolute path to the source photo library |
 | `LISTEN_ADDR` | No | `:8090` | HTTP listener address |
 | `INDEX_WORKER` | No | Up to 4, limited by `GOMAXPROCS` | Maximum number of images processed concurrently |
@@ -38,7 +38,8 @@ The application is organized under `internal/app`:
 | Area | Files | Responsibility |
 |---|---|---|
 | Startup | `cmd/fast-fotos/main.go` | Loads configuration and starts the HTTP server |
-| HTTP, database, views | `internal/app/server.go` | Schema migration, routes, queries, and template rendering |
+| HTTP, views | `internal/app/server.go` | Routes and template rendering |
+| Database | `internal/app/db.go` | SQLite schema migration and all SQL queries |
 | Indexing | `internal/app/indexer.go` | File discovery, EXIF extraction, thumbnails, and incremental/full indexes |
 | UI | `internal/app/templates/`, `internal/app/static/` | Go HTML templates, CSS, and browser behavior |
 
@@ -100,7 +101,7 @@ kept in memory, exposed through `GET /index-progress`, and polled by the header 
 
 Each indexing run uses a bounded worker pool controlled by `INDEX_WORKER`. A worker
 handles one file at a time, including metadata extraction, full-resolution decode,
-thumbnail resizing, JPEG encoding, and the PostgreSQL upsert. The default is at most
+thumbnail resizing, JPEG encoding, and the SQLite upsert. The default is at most
 four workers, which improves throughput without creating an unbounded number of
 simultaneous decoded images. `RESIZE_FILTER=bilinear` is the balanced default;
 `catmull-rom` favors quality at higher CPU cost, while `approx-bilinear` favors speed.
@@ -128,7 +129,7 @@ Photo preview supports left/right and Page Up/Page Down navigation. In selectabl
 photo grids, it displays whether the current photo is selected and lets the user
 synchronize that selection with the grid.
 
-Selections are persisted in PostgreSQL in `selection_photos`, keyed by a random
+Selections are persisted in SQLite in `selection_photos`, keyed by a random
 browser-session cookie. The `/selection` endpoints synchronize visible checkboxes,
 and `/selected` renders the complete server-side selection across all views.
 
