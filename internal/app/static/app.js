@@ -10,7 +10,7 @@ function updateActionMenu() {
   const actionMenu = document.querySelector(".action-menu-panel");
   if (!actionMenu) return;
   if (selectedCount === 0) {
-    actionMenu.querySelectorAll("button:not(#select-all)").forEach((button) => {
+    actionMenu.querySelectorAll("button:not(#select-all):not(#unselect-all):not(#clear-selection-all)").forEach((button) => {
       button.disabled = true;
     });
   } else {
@@ -29,18 +29,39 @@ function toggleOne(id) {
   updateActionMenu();
 }
 
-function selectAll() {
-  //select all checkboxes with data-photo-selection attribute
-  document.querySelectorAll("[data-photo-selection]").forEach((input) => {
-    input.checked = true;
+//persists selection changes to the server-side 'selected' collection
+function persistSelection(ids, selected) {
+  if (ids.length === 0) return;
+  const body = new URLSearchParams({ ids: ids.join(",") });
+  fetch("/selection", { method: selected ? "POST" : "DELETE", body }).catch((error) => {
+    console.error("Could not save selection", error);
   });
+}
+
+function setPageSelection(selected) {
+  const ids = [];
+  document.querySelectorAll("[data-photo-selection]").forEach((input) => {
+    if (input.checked !== selected) ids.push(input.value);
+    input.checked = selected;
+  });
+  persistSelection(ids, selected);
   updateActionMenu();
 }
 
+function selectAll() {
+  setPageSelection(true);
+}
+
 function selectNone() {
-  //deselect all checkboxes with data-photo-selection attribute
+  setPageSelection(false);
+}
+
+function clearSelection() {
   document.querySelectorAll("[data-photo-selection]").forEach((input) => {
     input.checked = false;
+  });
+  fetch("/selection/clear", { method: "POST" }).catch((error) => {
+    console.error("Could not clear selection", error);
   });
   updateActionMenu();
 }
@@ -50,6 +71,7 @@ document.addEventListener("DOMContentLoaded", () => {
   //adds an eventlistener to each checkbox with the data-photo-selection attribute to update the action menu when the checkbox is changed
   document.addEventListener("change", (event) => {
     if (!event.target.matches("[data-photo-selection]")) return;
+    persistSelection([event.target.value], event.target.checked);
     updateActionMenu();
   });
 
@@ -129,8 +151,15 @@ function updatePreviewSelection() {
   const trigger = document.querySelector(`.photo-preview-trigger[data-photo-id="${preview.dataset.photoId}"]`);
   const checkbox = trigger?.closest(".photo")?.querySelector('input[type="checkbox"]');
   const viewerCheckbox = document.querySelector("#photo-viewer-checkbox");
-  if (checkbox) checkbox.checked = viewerCheckbox.checked;
+  if (checkbox) {
+    checkbox.checked = viewerCheckbox.checked;
+    persistSelection([checkbox.value], checkbox.checked);
+  }
 }
+
+document.addEventListener("change", (event) => {
+  if (event.target.matches("#photo-viewer-checkbox")) updatePreviewSelection();
+});
 
 document.addEventListener("keydown", (event) => {
   if (!document.body.classList.contains("page-image")) return;
@@ -157,7 +186,7 @@ document.addEventListener("keydown", (event) => {
     selectAll();
   }
   if (event.key === "d" || event.key === "D") {
-    unselectAll();
+    selectNone();
   }
   const selector = event.key === "PageUp" || event.key === "ArrowLeft"
     ? "[data-image-previous]"

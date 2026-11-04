@@ -43,15 +43,24 @@ func (s *Server) reindexPhotos(ctx context.Context) (int, error) {
 	if err := s.db.ClearIndexState(ctx); err != nil {
 		return 0, fmt.Errorf("clear index state: %w", err)
 	}
-	reindexStartedAt := time.Now().UTC()
-	count, err := s.indexPhotoPaths(ctx, nil, reindexStartedAt)
+	paths, err := photoPaths(s.config.PhotoRoot)
 	if err != nil {
-		return count, err
+		return 0, err
 	}
-	if err := s.db.DeleteStalePhotos(ctx, reindexStartedAt); err != nil {
-		return count, fmt.Errorf("remove stale photos: %w", err)
+	existing := make([]string, 0, len(paths))
+	for _, fullPath := range paths {
+		relativePath, err := filepath.Rel(s.config.PhotoRoot, fullPath)
+		if err != nil {
+			return 0, err
+		}
+		existing = append(existing, relativePath)
 	}
-	return count, nil
+	removed, err := s.db.DeleteMissingPhotos(ctx, existing)
+	if err != nil {
+		return 0, fmt.Errorf("remove deleted photos: %w", err)
+	}
+	slog.Info("removed records for deleted files", "count", removed)
+	return s.indexPhotoPaths(ctx, nil, time.Now().UTC())
 }
 
 // indexPhotos performs an incremental index of new or updated photos since the last index timestamp.
@@ -127,6 +136,10 @@ func (s *Server) indexPhotoPaths(ctx context.Context, modifiedSince *time.Time, 
 	}
 	if err := s.db.DeriveNearbyLocations(ctx); err != nil {
 		return count, fmt.Errorf("derive nearby locations: %w", err)
+	}
+	// Golden hour needs a location, so it is computed after locations are derived.
+	if _, err := s.db.UpdateGoldenHour(ctx); err != nil {
+		return count, fmt.Errorf("update golden hour: %w", err)
 	}
 	if err := s.db.RecordIndexedAt(ctx, indexStartedAt); err != nil {
 		return count, err

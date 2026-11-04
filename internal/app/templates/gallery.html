@@ -8,8 +8,9 @@
       <details class="action-menu">
         <summary aria-label="Open selected menu"><span aria-hidden="true" class="material-symbols-outlined">check_box</span><span class="sr-only">Selected</span></summary>
         <div class="action-menu-panel">
-          <button onClick="selectAll()"id="select-all">Select All</button>
-          <button onClick="selectNone()" id="unselect-all">Unselect All</button>
+          <button onClick="selectAll()" id="select-all">Select all on page</button>
+          <button onClick="selectNone()" id="unselect-all">Unselect all on page</button>
+          <button onClick="clearSelection()" id="clear-selection-all">Clear all selected</button>
           <button type="button" id="add-selection-to-collection" class="btn btn-light p-1" command="show-modal" commandfor="add-to-collection-dialog">Add Selected To Collection</button>
           <button type="button" data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" id="download-with-raw" disabled>Download selected with raw files</button>
           <button type="button" data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" id="download-without-raw" disabled>Download selected without raw files</button>
@@ -18,7 +19,7 @@
     </div>
 </div>
 <div class="grid">
-  {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}" aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
+  {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}"{{if index $.Selected .ID}} checked{{end}} aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
 {{else}}<p>No photos found</p>{{end}}
 </div>
 {{end}}

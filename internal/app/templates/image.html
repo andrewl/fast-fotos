@@ -3,7 +3,7 @@
 <aside class="image-info">
   <a href="{{.ReturnURL}}">Back to {{.CollectionName}}</a>
   <h2>Details</h2>
-  <label><input data-photo-selection type="checkbox" value="{{.Photo.ID}}"> Select photo</label>
+  <label><input data-photo-selection type="checkbox" value="{{.Photo.ID}}"{{if index .Selected .Photo.ID}} checked{{end}}> Select photo</label>
   {{if .Photo.RawPath}}<p>Raw file available</p><a href="/raw/{{.Photo.ID}}">Download raw</a>{{end}}
   <dl>
     <dt>Captured</dt><dd>{{photoTakenAt .Photo.TakenAt}}</dd>
