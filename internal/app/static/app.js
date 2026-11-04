@@ -499,3 +499,39 @@ if (location.pathname.startsWith("/image/")) {
 }
 
 window.addEventListener("load", initialisePhotoMap);
+
+(() => {
+  const toggle = document.getElementById("sidebar-toggle");
+  const sidebar = document.querySelector("main > aside");
+  if (!toggle || !sidebar) { if (toggle) toggle.hidden = true; return; }
+  sidebar.id = "sidebar";
+  const setOpen = (open) => {
+    document.body.classList.toggle("sidebar-open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.addEventListener("click", () => setOpen(!document.body.classList.contains("sidebar-open")));
+  sidebar.addEventListener("click", (event) => { if (event.target.closest("a")) setOpen(false); });
+})();
+
+// Touch gestures on a displayed photo reuse the keyboard handlers: swipe = previous/next, tap = select.
+(() => {
+  let start = null;
+  const photoFrom = (target) => target.closest?.(".image-panel img, #photo-viewer img");
+  const press = (key) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  document.addEventListener("touchstart", (event) => {
+    start = event.touches.length === 1 && photoFrom(event.target)
+      ? { x: event.touches[0].clientX, y: event.touches[0].clientY }
+      : null;
+  }, { passive: true });
+  document.addEventListener("touchend", (event) => {
+    if (!start || !photoFrom(event.target)) { start = null; return; }
+    const dx = event.changedTouches[0].clientX - start.x;
+    const dy = event.changedTouches[0].clientY - start.y;
+    start = null;
+    if (Math.abs(dx) >= 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      press(dx < 0 ? "ArrowRight" : "ArrowLeft");
+    } else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+      press(" ");
+    }
+  }, { passive: true });
+})();
