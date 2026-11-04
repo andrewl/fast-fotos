@@ -130,6 +130,7 @@ type PageData struct {
 	CollectionName     string
 	PreviousPhotoID    int64
 	NextPhotoID        int64
+	Selected           map[int64]bool
 }
 
 // SearchData holds filter parameters and dropdown values for photo search options.
@@ -228,6 +229,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /collection", s.addToCollection)
 	mux.HandleFunc("DELETE /collection/", s.removeFromCollection)
 	mux.HandleFunc("DELETE /collections/", s.deleteCollection)
+	mux.HandleFunc("POST /selection", s.selectPhotos)
+	mux.HandleFunc("DELETE /selection", s.unselectPhotos)
+	mux.HandleFunc("POST /selection/clear", s.clearSelection)
 	mux.HandleFunc("POST /index", s.index)
 	mux.HandleFunc("POST /reindex", s.reindex)
 	mux.HandleFunc("POST /stop-indexing", s.stopIndexing)
@@ -891,11 +895,50 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.db.DeleteCollection(r.Context(), galleryID); err != nil {
+		if errors.Is(err, ErrProtectedCollection) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		slog.Error("Failed to delete collection", "collection_id", galleryID, "error", err)
 		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// selectPhotos adds photo IDs to the selected collection.
+func (s *Server) selectPhotos(w http.ResponseWriter, r *http.Request) {
+	s.changeSelection(w, r, s.db.SelectPhotos)
+}
+
+// unselectPhotos removes photo IDs from the selected collection.
+func (s *Server) unselectPhotos(w http.ResponseWriter, r *http.Request) {
+	s.changeSelection(w, r, s.db.UnselectPhotos)
+}
+
+func (s *Server) changeSelection(w http.ResponseWriter, r *http.Request, change func(context.Context, []int64) error) {
+	photoIDs, err := parseIDList(r.FormValue("ids"))
+	if err != nil {
+		slog.Error("Invalid photo IDs provided for selection", "error", err)
+		http.Error(w, "Invalid photo selection", http.StatusBadRequest)
+		return
+	}
+	if err := change(r.Context(), photoIDs); err != nil {
+		slog.Error("Failed to update selection", "error", err)
+		http.Error(w, "Could not update selection", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// clearSelection empties the selected collection.
+func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.ClearSelection(r.Context()); err != nil {
+		slog.Error("Failed to clear selection", "error", err)
+		http.Error(w, "Could not clear selection", http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1240,6 +1283,13 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 // render executes a named HTML template with PageData context and writes the output response.
 func (s *Server) render(w http.ResponseWriter, name string, data PageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if data.Selected == nil {
+		selected, err := s.db.SelectedPhotoIDs(context.Background())
+		if err != nil {
+			slog.Error("load selected photos", "error", err)
+		}
+		data.Selected = selected
+	}
 	page, ok := s.templates[name]
 	if !ok {
 		slog.Error("template not found", "name", name)

@@ -16,6 +16,12 @@ import (
 // timeLayout is a fixed-width UTC layout so timestamps stored as TEXT sort chronologically.
 const timeLayout = "2006-01-02 15:04:05.000000"
 
+// SelectedCollectionName is the reserved collection that holds the user's current photo selection.
+const SelectedCollectionName = "selected"
+
+// ErrProtectedCollection is returned when attempting to delete the selected collection.
+var ErrProtectedCollection = errors.New("the selected collection cannot be deleted")
+
 // DB wraps the SQLite database. All SQL used by the application lives in this file.
 type DB struct {
 	sql *sql.DB
@@ -118,7 +124,93 @@ func (d *DB) migrate(ctx context.Context) error {
 		slog.Error("migrate database", "error", err)
 		return fmt.Errorf("migrate database: %w", err)
 	}
+	if _, err := d.sql.ExecContext(ctx, `INSERT OR IGNORE INTO collections (name) VALUES (?)`, SelectedCollectionName); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	if err := d.addColumnIfMissing(ctx, "photos", "golden_hour", "INTEGER"); err != nil {
+		return err
+	}
+	if _, err := d.sql.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS photos_golden_hour_idx ON photos (golden_hour)`); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
 	return nil
+}
+
+// addColumnIfMissing adds a column to an existing table when it is not already present.
+func (d *DB) addColumnIfMissing(ctx context.Context, table, column, definition string) error {
+	var count int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := d.sql.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		slog.Error("migrate database", "error", err)
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	return nil
+}
+
+// UpdateGoldenHour computes golden_hour (1/0) for located photos where it is not yet set.
+// It must run after locations are extracted and derived. It returns the number of photos updated.
+func (d *DB) UpdateGoldenHour(ctx context.Context) (int, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, taken_at, latitude, longitude FROM photos
+		WHERE golden_hour IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL
+		AND NOT (latitude = 0 AND longitude = 0)`)
+	if err != nil {
+		return 0, fmt.Errorf("select photos for golden hour: %w", err)
+	}
+	type update struct {
+		id    int64
+		value int
+	}
+	var updates []update
+	for rows.Next() {
+		var id int64
+		var takenAt string
+		var lat, lon float64
+		if err := rows.Scan(&id, &takenAt, &lat, &lon); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		t, err := parseTime(takenAt)
+		if err != nil {
+			slog.Warn("golden hour: invalid taken_at", "id", id, "error", err)
+			continue
+		}
+		value := 0
+		if isGoldenHour(t, lat, lon) {
+			value = 1
+		}
+		updates = append(updates, update{id, value})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `UPDATE photos SET golden_hour = ? WHERE id = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, u := range updates {
+		if _, err := stmt.ExecContext(ctx, u.value, u.id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(updates), nil
 }
 
 func formatTime(t time.Time) string {
@@ -261,6 +353,43 @@ func (d *DB) DeleteStalePhotos(ctx context.Context, before time.Time) error {
 	return err
 }
 
+// DeleteMissingPhotos removes photos whose path is not in existing, returning the number removed.
+func (d *DB) DeleteMissingPhotos(ctx context.Context, existing []string) (int64, error) {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS existing_paths (path TEXT PRIMARY KEY)`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM existing_paths`); err != nil {
+		return 0, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO existing_paths (path) VALUES (?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	for _, path := range existing {
+		if _, err := stmt.ExecContext(ctx, path); err != nil {
+			return 0, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM photos WHERE path NOT IN (SELECT path FROM existing_paths)`)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM existing_paths`); err != nil {
+		return 0, err
+	}
+	return removed, tx.Commit()
+}
+
 // UpsertPhoto inserts or updates a photo record keyed by path. A nil thumbnail keeps any existing one.
 func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 	var thumbnail any
@@ -279,7 +408,7 @@ func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 			settlement = excluded.settlement, region = excluded.region, country = excluded.country,
 			camera_model = excluded.camera_model, focal_length = excluded.focal_length,
 			flash_fired = excluded.flash_fired, objects = excluded.objects, dominant_colors = excluded.dominant_colors,
-			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year`,
+			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL`,
 		p.Path, p.RawPath, formatTime(p.TakenAt), p.Latitude, p.Longitude, thumbnail, p.Location, p.LocationSource,
 		p.Settlement, p.Region, p.Country, p.CameraModel, p.FocalLength, p.FlashFired,
 		encodeStrings(p.Objects), encodeStrings(p.DominantColors), p.MediaType, p.DurationSeconds,
@@ -709,6 +838,9 @@ func (d *DB) RemovePhotosFromCollection(ctx context.Context, collectionID int64,
 
 // DeleteCollection deletes a collection and its photo memberships.
 func (d *DB) DeleteCollection(ctx context.Context, id int64) error {
+	if name, err := d.CollectionName(ctx, id); err == nil && name == SelectedCollectionName {
+		return ErrProtectedCollection
+	}
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -721,4 +853,59 @@ func (d *DB) DeleteCollection(ctx context.Context, id int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// selectedCollectionID returns the ID of the reserved selected collection.
+func (d *DB) selectedCollectionID(ctx context.Context) (int64, error) {
+	var id int64
+	err := d.sql.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = ?`, SelectedCollectionName).Scan(&id)
+	return id, err
+}
+
+// SelectedPhotoIDs returns the set of selected photo IDs.
+func (d *DB) SelectedPhotoIDs(ctx context.Context) (map[int64]bool, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT cp.photo_id FROM collection_photos cp
+		JOIN collections c ON c.id = cp.collection_id WHERE c.name = ?`, SelectedCollectionName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = true
+	}
+	return ids, rows.Err()
+}
+
+// SelectPhotos adds photos to the selected collection.
+func (d *DB) SelectPhotos(ctx context.Context, photoIDs []int64) error {
+	id, err := d.selectedCollectionID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = d.AddPhotosToCollection(ctx, id, photoIDs)
+	return err
+}
+
+// UnselectPhotos removes photos from the selected collection.
+func (d *DB) UnselectPhotos(ctx context.Context, photoIDs []int64) error {
+	id, err := d.selectedCollectionID(ctx)
+	if err != nil {
+		return err
+	}
+	return d.RemovePhotosFromCollection(ctx, id, photoIDs)
+}
+
+// ClearSelection removes every photo from the selected collection.
+func (d *DB) ClearSelection(ctx context.Context) error {
+	id, err := d.selectedCollectionID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = d.sql.ExecContext(ctx, `DELETE FROM collection_photos WHERE collection_id = ?`, id)
+	return err
 }

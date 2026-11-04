@@ -99,3 +99,51 @@ func TestDBRoundTrip(t *testing.T) {
 		t.Fatalf("stale photos not removed: %+v", months)
 	}
 }
+
+func TestDeleteMissingPhotos(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	for _, p := range []string{"keep.jpg", "gone.jpg"} {
+		if err := db.UpsertPhoto(ctx, PhotoRecord{Path: p, TakenAt: now, MediaType: "photo", IndexedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := db.DeleteMissingPhotos(ctx, []string{"keep.jpg"})
+	if err != nil || removed != 1 {
+		t.Fatalf("removed %d, err %v", removed, err)
+	}
+}
+
+func TestSelectedCollection(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	if err := db.UpsertPhoto(ctx, PhotoRecord{Path: "a.jpg", TakenAt: now, MediaType: "photo", IndexedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SelectPhotos(ctx, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := db.SelectedPhotoIDs(ctx); !ids[1] {
+		t.Fatalf("not selected: %v", ids)
+	}
+	id, _ := db.selectedCollectionID(ctx)
+	if err := db.DeleteCollection(ctx, id); err != ErrProtectedCollection {
+		t.Fatalf("want protected, got %v", err)
+	}
+	if err := db.ClearSelection(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := db.SelectedPhotoIDs(ctx); len(ids) != 0 {
+		t.Fatalf("not cleared: %v", ids)
+	}
+}
