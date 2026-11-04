@@ -46,7 +46,8 @@ type ONNXDetector struct {
 
 // LoadONNXDetector inspects the specified directory for ONNX Runtime dynamic libraries
 // and object detection model files (.onnx), initializing a new ONNXDetector session.
-func LoadONNXDetector(directory string) (*ONNXDetector, error) {
+// intraOpThreads and interOpThreads set the ONNX Runtime thread counts; 0 uses the runtime default.
+func LoadONNXDetector(directory string, intraOpThreads, interOpThreads int) (*ONNXDetector, error) {
 	runtimePath, err := filepath.Glob(filepath.Join(directory, "libonnxruntime.so.*"))
 	if err != nil {
 		return nil, fmt.Errorf("find ONNX Runtime library in %s: %w", directory, err)
@@ -102,8 +103,20 @@ func LoadONNXDetector(directory string) (*ONNXDetector, error) {
 		}
 	}
 
+	options, err := ort.NewSessionOptions()
+	if err != nil {
+		return nil, fmt.Errorf("create ONNX session options: %w", err)
+	}
+	defer options.Destroy()
+	if err := options.SetIntraOpNumThreads(intraOpThreads); err != nil {
+		return nil, fmt.Errorf("set ONNX intra-op threads: %w", err)
+	}
+	if err := options.SetInterOpNumThreads(interOpThreads); err != nil {
+		return nil, fmt.Errorf("set ONNX inter-op threads: %w", err)
+	}
+
 	session, err := ort.NewDynamicAdvancedSession(modelPath,
-		[]string{inputs[0].Name}, outputNames, nil)
+		[]string{inputs[0].Name}, outputNames, options)
 	if err != nil {
 		return nil, fmt.Errorf("load object model: %w", err)
 	}

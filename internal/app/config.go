@@ -17,6 +17,9 @@ type Config struct {
 	ResizeFilter   string
 	GeoNamesDir    string
 	ObjectModelDir string
+	// ONNX thread counts; 0 uses the ONNX Runtime default.
+	ONNXIntraOpThreads int
+	ONNXInterOpThreads int
 }
 
 // ConfigFromEnvironment loads and validates application configuration settings from environment variables.
@@ -52,7 +55,27 @@ func ConfigFromEnvironment() (Config, error) {
 	if config.ResizeFilter != "bilinear" && config.ResizeFilter != "approx-bilinear" && config.ResizeFilter != "catmull-rom" {
 		return Config{}, errors.New("RESIZE_FILTER must be bilinear, approx-bilinear, or catmull-rom")
 	}
+	var err error
+	if config.ONNXIntraOpThreads, err = threadsFromEnvironment("ONNX_INTRA_OP_THREADS"); err != nil {
+		return Config{}, err
+	}
+	if config.ONNXInterOpThreads, err = threadsFromEnvironment("ONNX_INTER_OP_THREADS"); err != nil {
+		return Config{}, err
+	}
 	return config, nil
+}
+
+// threadsFromEnvironment reads a non-negative thread count; unset means 0 (ONNX Runtime default).
+func threadsFromEnvironment(name string) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return 0, nil
+	}
+	threads, err := strconv.Atoi(value)
+	if err != nil || threads < 0 {
+		return 0, errors.New(name + " must be a non-negative integer")
+	}
+	return threads, nil
 }
 
 // defaultIndexWorkers calculates the default number of concurrent indexing worker goroutines.

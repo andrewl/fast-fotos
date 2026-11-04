@@ -15,6 +15,8 @@ The `fast-fotos` executable reads:
 | `LISTEN_ADDR` | No | `:8090` | HTTP listener address |
 | `INDEX_WORKER` | No | Up to 4, limited by `GOMAXPROCS` | Maximum number of images processed concurrently |
 | `RESIZE_FILTER` | No | `bilinear` | Thumbnail filter: `bilinear`, `approx-bilinear`, or `catmull-rom` |
+| `ONNX_INTRA_OP_THREADS` | No | `0` (ONNX Runtime default) | Threads used within a single ONNX graph node |
+| `ONNX_INTER_OP_THREADS` | No | `0` (ONNX Runtime default) | Threads used across ONNX graph nodes |
 | `GEONAMES_DIR` | No | disabled | Directory containing GeoNames text files or ZIP files for offline reverse geocoding |
 
 `compose.yaml` mounts `PHOTO_ROOT` at `/photos` as read-only and persists PostgreSQL

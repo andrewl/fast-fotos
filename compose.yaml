@@ -6,26 +6,15 @@ services:
     environment:
       DATABASE_PATH: /data/fast-fotos.db
       PHOTO_ROOT: /photos
-      INDEX_WORKER: 4
+      INDEX_WORKER: 2
       GEONAMES_DIR: /geonames
       GEONAMES_AUTO_INSTALL: "true"
       OBJECT_MODEL_DIR: /models
       OBJECT_AUTO_INSTALL: "true"
+      ONNX_INTRA_OP_THREADS: 2
+      ONNX_INTER_OP_THREADS: 1
     volumes:
-      - type: bind
-        source: ${PHOTO_ROOT:-./photos}
-        target: /photos
-        read_only: true
-      - type: bind
-        source: ${GEONAMES_DIR:-fast-fotos-geonames}
-        target: /geonames
-      - type: volume
-        source: fast-fotos-models
-        target: /models
-      - type: volume
-        source: fast-fotos-data
-        target: /data
-volumes:
-  fast-fotos-data:
-  fast-fotos-geonames:
-  fast-fotos-models:
+      - ./pf:/photos
+      - ./fast-fotos-geonames:/geonames
+      - ./fast-fotos-models:/models
+      - ./data:/data

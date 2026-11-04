@@ -184,7 +184,7 @@ func NewServer(ctx context.Context, config Config) (*Server, error) {
 		}
 	}
 	if config.ObjectModelDir != "" {
-		server.detector, err = objects.LoadONNXDetector(config.ObjectModelDir)
+		server.detector, err = objects.LoadONNXDetector(config.ObjectModelDir, config.ONNXIntraOpThreads, config.ONNXInterOpThreads)
 		if err != nil {
 			slog.Error("load object detector", "error", err)
 			db.Close()

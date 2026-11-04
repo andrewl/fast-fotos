@@ -68,7 +68,7 @@ func TestInspectYOLOv11(t *testing.T) {
 	if _, err := os.Stat(dir + "/yolo11s.onnx"); err != nil {
 		t.Skip("yolo11s.onnx not present")
 	}
-	detector, err := LoadONNXDetector(dir)
+	detector, err := LoadONNXDetector(dir, 0, 0)
 	if err != nil {
 		t.Fatalf("LoadONNXDetector: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"time"
 
 	"github.com/andrewl/fast-fotos/internal/app"
@@ -22,9 +23,11 @@ func main() {
 	}
 	defer server.Close()
 
+	http.Handle("/", server.Routes())
+
 	httpServer := &http.Server{
 		Addr:              config.ListenAddress,
-		Handler:           server.Routes(),
+		Handler:           http.DefaultServeMux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("fast-fotos listening on http://%s", config.ListenAddress)
