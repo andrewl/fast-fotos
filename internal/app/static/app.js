@@ -161,8 +161,132 @@ document.addEventListener("change", (event) => {
   if (event.target.matches("#photo-viewer-checkbox")) updatePreviewSelection();
 });
 
+//adds the photo on the current image page to a collection without leaving the page
+async function toggleCurrentPhotoInCollection(item) {
+  const photoId = document.querySelector("#image-collection-dialog").dataset.photoId;
+  const status = document.querySelector("#collection-status");
+  const remove = item.classList.contains("in-collection");
+  const params = new URLSearchParams({ ids: photoId, collection_id: item.dataset.collectionShortcut });
+  const response = remove
+    ? await fetch(`/collection/0?${params}`, { method: "DELETE" })
+    : await fetch("/collection", { method: "POST", body: params });
+  if (!response.ok) {
+    status.textContent = (await response.text()).trim();
+    return;
+  }
+  item.classList.toggle("in-collection", !remove);
+  status.textContent = `${remove ? "Removed from" : "Added to"} ${item.textContent}`;
+}
+
+//zoom and pan the displayed image; zoom level 0 is 1:1, each level adds 50%
+const MAX_ZOOM_LEVEL = 8;
+const zoomState = { level: 0, x: 0, y: 0 };
+
+function applyZoom() {
+  const image = document.querySelector(".image-panel img");
+  if (!image) return;
+  const scale = 1 + zoomState.level * 0.5;
+  const maxX = (scale - 1) * image.offsetWidth / 2;
+  const maxY = (scale - 1) * image.offsetHeight / 2;
+  zoomState.x = Math.max(-maxX, Math.min(maxX, zoomState.x));
+  zoomState.y = Math.max(-maxY, Math.min(maxY, zoomState.y));
+  image.style.transform = zoomState.level === 0 ? "" : `translate(${zoomState.x}px, ${zoomState.y}px) scale(${scale})`;
+  image.closest(".image-panel").classList.toggle("zoomed", zoomState.level > 0);
+}
+
+function zoomBy(delta) {
+  zoomState.level = Math.max(0, Math.min(MAX_ZOOM_LEVEL, zoomState.level + delta));
+  applyZoom();
+}
+
+function panBy(dx, dy) {
+  const image = document.querySelector(".image-panel img");
+  if (!image || zoomState.level === 0) return;
+  zoomState.x += dx * image.offsetWidth * 0.1;
+  zoomState.y += dy * image.offsetHeight * 0.1;
+  applyZoom();
+}
+
+function toggleSidebar() {
+  document.body.classList.toggle("sidebar-hidden");
+}
+
+async function addCurrentPhotoToCollection(fields) {
+  const photoId = document.querySelector("#image-collection-dialog").dataset.photoId;
+  const body = new URLSearchParams({ ids: photoId, ...fields });
+  const status = document.querySelector("#collection-status");
+  const response = await fetch("/collection", { method: "POST", body });
+  const text = (await response.text()).trim();
+  if (!response.ok) {
+    status.textContent = text.startsWith("No selected photos") ? "Already in that collection" : text;
+    return false;
+  }
+  status.textContent = "Added to collection";
+  return true;
+}
+
+function setupImageCollectionDialog() {
+  const dialog = document.querySelector("#image-collection-dialog");
+  if (!dialog) return;
+  const select = dialog.querySelector("#image-collection-select");
+  const nameLabel = dialog.querySelector("#image-collection-name-label");
+  const nameInput = nameLabel.querySelector("input");
+  const error = dialog.querySelector("#image-collection-error");
+  const syncName = () => {
+    nameLabel.hidden = select.value !== "";
+  };
+  select.addEventListener("change", syncName);
+  dialog.querySelector("#image-collection-cancel").addEventListener("click", () => dialog.close());
+  dialog.querySelector("form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const created = select.value === "";
+    const ok = await addCurrentPhotoToCollection({ collection_id: select.value, name: created ? nameInput.value : "" });
+    if (!ok) {
+      error.textContent = document.querySelector("#collection-status").textContent;
+      error.hidden = false;
+      return;
+    }
+    dialog.close();
+    if (created) window.location.reload();
+  });
+  dialog.addEventListener("close", () => {
+    error.hidden = true;
+    nameInput.value = "";
+  });
+  dialog.syncName = syncName;
+}
+
+document.addEventListener("DOMContentLoaded", setupImageCollectionDialog);
+
 document.addEventListener("keydown", (event) => {
   if (!document.body.classList.contains("page-image")) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.target.closest("dialog[open], textarea, select, input:not([type=checkbox])")) return;
+  if (event.key === "c" || event.key === "C") {
+    const dialog = document.querySelector("#image-collection-dialog");
+    event.preventDefault();
+    dialog.syncName();
+    dialog.showModal();
+    return;
+  }
+  if (/^[1-9]$/.test(event.key)) {
+    const item = document.querySelectorAll("[data-collection-shortcut]")[Number(event.key) - 1];
+    if (item) {
+      event.preventDefault();
+      toggleCurrentPhotoInCollection(item);
+    }
+    return;
+  }
+  const keyActions = {
+    s: toggleSidebar, "+": () => zoomBy(1), "=": () => zoomBy(1), "-": () => zoomBy(-1), "_": () => zoomBy(-1),
+    q: () => panBy(1, 0), w: () => panBy(-1, 0), p: () => panBy(0, 1), l: () => panBy(0, -1)
+  };
+  const action = keyActions[event.key.toLowerCase()];
+  if (action) {
+    event.preventDefault();
+    action();
+    return;
+  }
   if (event.key === "Escape") {
     event.preventDefault();
     const returnLink = document.querySelector(".image-info > a");

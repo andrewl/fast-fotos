@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -71,6 +73,41 @@ func TestSelectWeeklyPhotosPrefersGoldenHourAndVariedSubjects(t *testing.T) {
 	}
 	if len(subjects) < 8 {
 		t.Errorf("selected only %d distinct subjects, want at least 8", len(subjects))
+	}
+}
+
+func TestSelectWeeklyPhotosIsDeterministic(t *testing.T) {
+	photos := []Photo{
+		{ID: 3, Objects: []string{"cat"}},
+		{ID: 1, Objects: []string{"cat"}},
+		{ID: 2, Objects: []string{"dog"}},
+	}
+
+	selected := selectWeeklyPhotos(photos, 3)
+	reversed := selectWeeklyPhotos([]Photo{photos[2], photos[1], photos[0]}, 3)
+	for i := range selected {
+		if selected[i].ID != reversed[i].ID {
+			t.Fatalf("selection changed with input order: %v != %v", selected, reversed)
+		}
+	}
+}
+
+func TestImageGalleryContextPhotosForThisWeek(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	server := &Server{db: db}
+	returnURL, collectionName, photos, err := server.imageGalleryContextPhotos(ctx, "/this-week/", "selection")
+	if err != nil {
+		t.Fatalf("imageGalleryContextPhotos() error = %v", err)
+	}
+	if returnURL != "/this-week/" || collectionName != "This Week" || len(photos) != 0 {
+		t.Errorf("imageGalleryContextPhotos() = (%q, %q, %d photos), want (%q, %q, 0 photos)",
+			returnURL, collectionName, len(photos), "/this-week/", "This Week")
 	}
 }
 
@@ -200,4 +237,30 @@ func TestAddFileToArchiveRejectsPathOutsideRoot(t *testing.T) {
 		t.Fatal("addFileToArchive() accepted a path outside the root")
 	}
 	_ = archive.Close()
+}
+
+func TestDeleteCollectionKeepsSelected(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := &Server{db: db}
+	id, err := db.CreateCollection(ctx, "Holiday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedID, err := db.selectedCollectionID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []int64{id, selectedID} {
+		request := httptest.NewRequest(http.MethodDelete, "/collections/"+strconv.FormatInt(target, 10), nil)
+		server.deleteCollection(httptest.NewRecorder(), request)
+	}
+	collections, err := db.Collections(ctx)
+	if err != nil || len(collections) != 1 || collections[0].Name != SelectedCollectionName {
+		t.Fatalf("collections = %+v, %v; want only the selected collection", collections, err)
+	}
 }

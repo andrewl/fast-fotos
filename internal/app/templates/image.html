@@ -14,11 +14,31 @@
     {{if .Photo.Objects}}<dt>Labels</dt><dd>{{join .Photo.Objects ", "}}</dd>{{end}}
     {{if .Photo.DominantColors}}<dt>Dominant colors</dt><dd>{{join .Photo.DominantColors ", "}}</dd>{{end}}
   </dl>
+  <h2>Shortcuts</h2>
+  <p class="shortcut-help"><kbd>Space</kbd> select / unselect<br><kbd>C</kbd> add to a collection<br><kbd>1</kbd>–<kbd>9</kbd> add to / remove from collection (✓ = in collection)<br><kbd>S</kbd> hide / show sidebar<br><kbd>+</kbd> / <kbd>-</kbd> zoom in / out<br><kbd>Q</kbd> <kbd>W</kbd> <kbd>P</kbd> <kbd>L</kbd> pan left / right / up / down when zoomed</p>
+  <ol class="collection-shortcuts">
+    {{range .OtherCollections}}<li data-collection-shortcut="{{.ID}}"{{if index $.PhotoCollections .ID}} class="in-collection"{{end}}>{{.Name}}</li>{{else}}<li class="none">No collections yet</li>{{end}}
+  </ol>
+  <p id="collection-status" role="status"></p>
   <div class="image-navigation">
     {{if .PreviousPhotoID}}<a href="{{imagePath .PreviousPhotoID .ReturnURL}}" data-image-previous>Previous</a>{{end}}
     {{if .NextPhotoID}}<a href="{{imagePath .NextPhotoID .ReturnURL}}" data-image-next>Next</a>{{end}}
   </div>
 </aside>
+<dialog id="image-collection-dialog" data-photo-id="{{.Photo.ID}}">
+  <form id="image-collection-form" method="dialog">
+    <h2>Add to collection</h2>
+    <label>Collection
+      <select name="collection_id" id="image-collection-select">
+        {{range .OtherCollections}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
+        <option value="">New collection…</option>
+      </select>
+    </label>
+    <label id="image-collection-name-label">New collection name <input name="name" maxlength="200"></label>
+    <p id="image-collection-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button type="submit">Add</button><button type="button" id="image-collection-cancel">Cancel</button></div>
+  </form>
+</dialog>
 <section class="image-panel">
   <!-- if this is a video then we need to use a video tag instead of an img tag -->
   {{if eq .Photo.MediaType "video" }}

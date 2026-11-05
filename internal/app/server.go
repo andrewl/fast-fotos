@@ -15,11 +15,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
-	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,6 +146,8 @@ type PageData struct {
 	CollectionName     string
 	PreviousPhotoID    int64
 	NextPhotoID        int64
+	OtherCollections   []Collection
+	PhotoCollections   map[int64]bool
 	Selected           map[int64]bool
 }
 
@@ -395,7 +397,19 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "image", PageData{Page: "image", Photo: &photo, Collections: galleries, ReturnURL: returnURL, CollectionName: collectionName, PreviousPhotoID: previousID, NextPhotoID: nextID})
+	photoCollections, err := s.db.CollectionIDsForPhoto(r.Context(), id)
+	if err != nil {
+		slog.Error("Failed to load photo collections", "id", id, "error", err)
+		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		return
+	}
+	var otherCollections []Collection
+	for _, gallery := range galleries {
+		if gallery.Name != SelectedCollectionName {
+			otherCollections = append(otherCollections, gallery)
+		}
+	}
+	s.render(w, "image", PageData{Page: "image", Photo: &photo, Collections: galleries, OtherCollections: otherCollections, PhotoCollections: photoCollections, ReturnURL: returnURL, CollectionName: collectionName, PreviousPhotoID: previousID, NextPhotoID: nextID})
 }
 
 // search renders the photo search form and filtered search result thumbnail grid.
@@ -569,6 +583,9 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 			slog.Error("Failed to load collection name", "collectionId", collectionID, "error", err)
 		}
 		return galleryURL.Path, name, photos, err
+	case galleryURL.Path == "/this-week/":
+		photos, err := s.photosForThisWeek(ctx)
+		return galleryURL.Path, "This Week", photos, err
 	case galleryURL.Path == "/search" || strings.HasPrefix(galleryURL.Path, "/search/"):
 		slog.Info("Loading search results", "query", galleryURL.Query())
 		query := galleryURL.Query()
@@ -657,7 +674,7 @@ func (s *Server) thisweek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "thisweek", PageData{Photos: photos})
+	s.render(w, "thisweek", PageData{Photos: photos, ReturnURL: r.URL.Path})
 }
 
 // locations renders the interactive Leaflet map and location selection sidebar.
@@ -964,7 +981,7 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.Header().Set("HX-Redirect", "/collection")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1363,8 +1380,11 @@ func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 		return nil
 	}
 	candidates := append([]Photo(nil), photos...)
-	mathrand.Shuffle(len(candidates), func(i, j int) {
-		candidates[i], candidates[j] = candidates[j], candidates[i]
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].TakenAt.Equal(candidates[j].TakenAt) {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].TakenAt.Before(candidates[j].TakenAt)
 	})
 
 	selected := make([]Photo, 0, min(limit, len(candidates)))

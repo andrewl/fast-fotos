@@ -814,6 +814,24 @@ func (d *DB) Collections(ctx context.Context) ([]Collection, error) {
 	return collections, rows.Err()
 }
 
+// CollectionIDsForPhoto returns the set of collection IDs that contain a photo.
+func (d *DB) CollectionIDsForPhoto(ctx context.Context, photoID int64) (map[int64]bool, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT collection_id FROM collection_photos WHERE photo_id = ?`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = true
+	}
+	return ids, rows.Err()
+}
+
 // CollectionByID returns one collection with its photo count.
 func (d *DB) CollectionByID(ctx context.Context, id int64) (Collection, error) {
 	var collection Collection
@@ -889,10 +907,10 @@ func (d *DB) DeleteCollection(ctx context.Context, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_photos WHERE collection_id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_photos WHERE collection_id = ? AND collection_id <> (SELECT id FROM collections WHERE name = ?)`, id, SelectedCollectionName); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM collections WHERE id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collections WHERE id = ? AND name <> ?`, id, SelectedCollectionName); err != nil {
 		return err
 	}
 	return tx.Commit()
