@@ -130,6 +130,9 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.addColumnIfMissing(ctx, "photos", "golden_hour", "INTEGER"); err != nil {
 		return err
 	}
+	if err := d.addColumnIfMissing(ctx, "photos", "objects_detected_at", "TEXT"); err != nil {
+		return err
+	}
 	if _, err := d.sql.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS photos_golden_hour_idx ON photos (golden_hour)`); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
@@ -401,22 +404,62 @@ func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, objects, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
-		VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO UPDATE
+	_, err = tx.ExecContext(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
+		VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO UPDATE
 		SET taken_at = excluded.taken_at, latitude = excluded.latitude, longitude = excluded.longitude,
 		raw_path = excluded.raw_path, thumbnail = COALESCE(excluded.thumbnail, photos.thumbnail), location = excluded.location, location_source = excluded.location_source,
 			settlement = excluded.settlement, region = excluded.region, country = excluded.country,
 			camera_model = excluded.camera_model, focal_length = excluded.focal_length,
-			flash_fired = excluded.flash_fired, objects = excluded.objects, dominant_colors = excluded.dominant_colors,
-			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL`,
+			flash_fired = excluded.flash_fired, dominant_colors = excluded.dominant_colors,
+			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL, objects_detected_at = NULL`,
 		p.Path, p.RawPath, formatTime(p.TakenAt), p.Latitude, p.Longitude, thumbnail, p.Location, p.LocationSource,
 		p.Settlement, p.Region, p.Country, p.CameraModel, p.FocalLength, p.FlashFired,
-		encodeStrings(p.Objects), encodeStrings(p.DominantColors), p.MediaType, p.DurationSeconds,
+		encodeStrings(p.DominantColors), p.MediaType, p.DurationSeconds,
 		formatTime(p.IndexedAt), p.DayOfYear)
 	if err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// PendingDetection is a photo awaiting object detection.
+type PendingDetection struct {
+	ID        int64
+	Path      string
+	Thumbnail []byte
+}
+
+// PendingDetectionCount returns the number of photos awaiting object detection.
+func (d *DB) PendingDetectionCount(ctx context.Context) (int, error) {
+	var count int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM photos WHERE objects_detected_at IS NULL`).Scan(&count)
+	return count, err
+}
+
+// NextPendingDetections returns up to limit photos with id > afterID whose object detection has not run.
+func (d *DB) NextPendingDetections(ctx context.Context, afterID int64, limit int) ([]PendingDetection, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, path, thumbnail FROM photos
+		WHERE objects_detected_at IS NULL AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingDetection
+	for rows.Next() {
+		var p PendingDetection
+		if err := rows.Scan(&p.ID, &p.Path, &p.Thumbnail); err != nil {
+			return nil, err
+		}
+		pending = append(pending, p)
+	}
+	return pending, rows.Err()
+}
+
+// SetDetectedObjects stores detection results and marks detection as done for a photo.
+func (d *DB) SetDetectedObjects(ctx context.Context, id int64, labels []string) error {
+	_, err := d.sql.ExecContext(ctx, `UPDATE photos SET objects = ?, objects_detected_at = ? WHERE id = ?`,
+		encodeStrings(labels), formatTime(time.Now().UTC()), id)
+	return err
 }
 
 // DeriveNearbyLocations populates location data for un-geotagged photos taken within 1 hour of a geotagged photo.
@@ -666,7 +709,7 @@ func (d *DB) PhotosByIDs(ctx context.Context, ids []int64) ([]Photo, error) {
 		return nil, nil
 	}
 	placeholders, args := idPlaceholders(ids)
-	rows, err := d.sql.QueryContext(ctx, `SELECT `+photoColumns+`, media_type, COALESCE(day_of_year, 0)
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+photoColumns+`, media_type, COALESCE(day_of_year, 0), COALESCE(golden_hour, 0)
 		FROM photos WHERE id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		slog.Error("Error querying photos by IDs: ", "err", err)
@@ -676,13 +719,13 @@ func (d *DB) PhotosByIDs(ctx context.Context, ids []int64) ([]Photo, error) {
 	var photos []Photo
 	for rows.Next() {
 		var mediaType string
-		var dayOfYear int
-		photo, err := scanPhoto(rows, &mediaType, &dayOfYear)
+		var dayOfYear, goldenHour int
+		photo, err := scanPhoto(rows, &mediaType, &dayOfYear, &goldenHour)
 		if err != nil {
 			slog.Error("Error scanning photo row: ", "err", err)
 			return nil, err
 		}
-		photo.MediaType, photo.DayOfYear = mediaType, dayOfYear
+		photo.MediaType, photo.DayOfYear, photo.GoldenHour = mediaType, dayOfYear, goldenHour != 0
 		photos = append(photos, photo)
 	}
 	return photos, rows.Err()

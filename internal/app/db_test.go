@@ -19,14 +19,33 @@ func TestDBRoundTrip(t *testing.T) {
 	base := time.Date(2024, 3, 5, 10, 0, 0, 0, time.UTC)
 	for i, rec := range []PhotoRecord{
 		{Path: "a.jpg", TakenAt: base, Latitude: &lat, Longitude: &lng, Location: "London", Settlement: "London", Region: "England",
-			FocalLength: &focal, FlashFired: &flash, Objects: []string{"cat"}, DominantColors: []string{"red"}, MediaType: "photo", DayOfYear: 65, Thumbnail: []byte{1}},
-		{Path: "b.jpg", TakenAt: base.Add(30 * time.Minute), Objects: []string{"dog"}, MediaType: "photo", DayOfYear: 65},
+			FocalLength: &focal, FlashFired: &flash, DominantColors: []string{"red"}, MediaType: "photo", DayOfYear: 65, Thumbnail: []byte{1}},
+		{Path: "b.jpg", TakenAt: base.Add(30 * time.Minute), MediaType: "photo", DayOfYear: 65},
 	} {
 		rec.LocationSource = map[bool]string{true: "extracted"}[rec.Location != ""]
 		rec.IndexedAt = base
 		if err := db.UpsertPhoto(ctx, rec); err != nil {
 			t.Fatalf("upsert %d: %v", i, err)
 		}
+	}
+	if _, err := db.sql.ExecContext(ctx, `UPDATE photos SET golden_hour = 1 WHERE path = 'a.jpg'`); err != nil {
+		t.Fatal(err)
+	}
+	if photo, err := db.PhotoByID(ctx, 1); err != nil || !photo.GoldenHour {
+		t.Fatalf("golden-hour photo: %+v %v", photo, err)
+	}
+	pending, err := db.NextPendingDetections(ctx, 0, 10)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("pending: %+v %v", pending, err)
+	}
+	if count, err := db.PendingDetectionCount(ctx); err != nil || count != 2 {
+		t.Fatalf("pending detection count: %d %v", count, err)
+	}
+	if err := db.SetDetectedObjects(ctx, pending[0].ID, []string{"cat"}); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err = db.NextPendingDetections(ctx, 0, 10); err != nil || len(pending) != 1 {
+		t.Fatalf("pending after detect: %+v %v", pending, err)
 	}
 	if err := db.DeriveNearbyLocations(ctx); err != nil {
 		t.Fatal(err)
@@ -44,7 +63,7 @@ func TestDBRoundTrip(t *testing.T) {
 	if got, err := db.SearchPhotos(ctx, SearchData{Label: "cat", DateFrom: "2024-03-05", DateTo: "2024-03-05", FocalLength: "50", Flash: "yes", Color: "red"}); err != nil || len(got) != 1 {
 		t.Fatalf("search: %+v %v", got, err)
 	}
-	if labels, err := db.Labels(ctx); err != nil || len(labels) != 2 {
+	if labels, err := db.Labels(ctx); err != nil || len(labels) != 1 {
 		t.Fatalf("labels: %v %v", labels, err)
 	}
 	if fl, err := db.FocalLengths(ctx); err != nil || len(fl) != 1 || fl[0] != "50" {

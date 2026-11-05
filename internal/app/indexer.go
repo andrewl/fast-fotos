@@ -23,7 +23,7 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-const thumbnailMaxDimension = 400
+const defaultThumbnailMaxDimension = 640
 
 var photoExtensions = map[string]bool{
 	".avif": true, ".gif": true, ".heic": true, ".jpeg": true, ".jpg": true,
@@ -147,7 +147,7 @@ func (s *Server) indexPhotoPaths(ctx context.Context, modifiedSince *time.Time, 
 	return count, nil
 }
 
-// indexPhoto extracts metadata, creates thumbnails, detects objects/colors, reverse geocodes, and saves a photo record to the database.
+// indexPhoto extracts metadata, creates thumbnails, extracts colors, reverse geocodes, and saves a photo record to the database.
 func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt time.Time) error {
 
 	//we want to use defer here because some broken jpegs can panic the decoder
@@ -155,7 +155,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		if r := recover(); r != nil {
 			slog.Warn("panic while indexing %s: %v", fullPath, r)
 		}
-	} ()
+	}()
 
 	relativePath, err := filepath.Rel(s.config.PhotoRoot, fullPath)
 	if err != nil {
@@ -179,9 +179,9 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		if err != nil {
 		}
 		if err == nil {
-		    dayOfYear = takenAt.YearDay()
+			dayOfYear = takenAt.YearDay()
 		}
-		thumbnail, err = createVideoThumbnail(ctx, fullPath)
+		thumbnail, err = createVideoThumbnail(ctx, fullPath, s.config.ThumbnailMaxDimension)
 		if err != nil {
 			slog.Warn("create video thumbnail for %s: %v", relativePath, err)
 		}
@@ -201,7 +201,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		} else {
 			dayOfYear = takenAt.YearDay()
 		}
-		thumbnail, err = createThumbnail(fullPath, s.config.ResizeFilter)
+		thumbnail, err = createThumbnail(fullPath, s.config.ResizeFilter, s.config.ThumbnailMaxDimension)
 		if err != nil {
 			slog.Warn("create thumbnail for %s: %v", relativePath, err)
 		}
@@ -215,16 +215,6 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		}
 		location = resolved.String()
 		settlement, region, country = resolved.Settlement, resolved.Region, resolved.Country
-	}
-	var labels []string
-	if s.detector != nil && thumbnail != nil {
-		labels, err = s.detector.Detect(ctx, thumbnail)
-		if err != nil {
-			slog.Warn("object detection for %s: %v", relativePath, err)
-		}
-	}
-	if labels == nil {
-		labels = []string{}
 	}
 	var dominantColors []string
 	if thumbnail != nil {
@@ -242,7 +232,7 @@ func (s *Server) indexPhoto(ctx context.Context, fullPath string, indexStartedAt
 		Thumbnail: thumbnail, Location: location, LocationSource: locationSource,
 		Settlement: settlement, Region: region, Country: country,
 		CameraModel: cameraModel, FocalLength: focalLength, FlashFired: flashFired,
-		Objects: labels, DominantColors: dominantColors, MediaType: mediaType,
+		DominantColors: dominantColors, MediaType: mediaType,
 		DurationSeconds: durationSeconds, IndexedAt: indexStartedAt, DayOfYear: dayOfYear,
 	})
 }
@@ -355,8 +345,8 @@ func readMetadata(path string) (time.Time, *float64, *float64, string, *float64,
 	return takenAt, nil, nil, cameraModel, focalLength, flashFired, nil
 }
 
-// createThumbnail generates a JPEG thumbnail byte buffer resized to fit within thumbnailMaxDimension.
-func createThumbnail(path, filterName string) ([]byte, error) {
+// createThumbnail generates a JPEG thumbnail byte buffer resized to fit within maxDimension.
+func createThumbnail(path, filterName string, maxDimension int) ([]byte, error) {
 	if _, err := resizeFilter(filterName); err != nil {
 		return nil, err
 	}
@@ -383,8 +373,8 @@ func createThumbnail(path, filterName string) ([]byte, error) {
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("image has invalid dimensions %dx%d", width, height)
 	}
-	if width > thumbnailMaxDimension || height > thumbnailMaxDimension {
-		scale := float64(thumbnailMaxDimension) / float64(max(width, height))
+	if width > maxDimension || height > maxDimension {
+		scale := float64(maxDimension) / float64(max(width, height))
 		width = int(float64(width)*scale + 0.5)
 		height = int(float64(height)*scale + 0.5)
 	}
@@ -438,5 +428,64 @@ func resizeFilter(name string) (draw.Interpolator, error) {
 		return draw.CatmullRom, nil
 	default:
 		return nil, fmt.Errorf("unknown resize filter %q", name)
+	}
+}
+
+// detectObjects runs object detection on photos that have not been processed yet, until none remain or ctx is cancelled.
+func (s *Server) detectObjects(ctx context.Context) {
+	total, err := s.db.PendingDetectionCount(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("count photos pending detection", "error", err)
+		}
+		return
+	}
+	s.updateDetectionProgress(0, total)
+
+	var afterID int64
+	detected := 0
+	for {
+		batch, err := s.db.NextPendingDetections(ctx, afterID, 50)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("list photos pending detection", "error", err)
+			}
+			return
+		}
+		if len(batch) == 0 {
+			if detected > 0 {
+				slog.Info("object detection finished", "count", detected)
+			}
+			return
+		}
+		for _, p := range batch {
+			if ctx.Err() != nil {
+				slog.Info("object detection interrupted", "count", detected)
+				return
+			}
+			afterID = p.ID
+			labels := []string{}
+			if len(p.Thumbnail) > 0 {
+				found, err := s.detector.Detect(ctx, p.Thumbnail)
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					slog.Warn("object detection failed", "path", p.Path, "error", err)
+					continue
+				}
+				if found != nil {
+					labels = found
+				}
+			}
+			if err := s.db.SetDetectedObjects(ctx, p.ID, labels); err != nil {
+				if ctx.Err() == nil {
+					slog.Error("save detected objects", "path", p.Path, "error", err)
+				}
+				return
+			}
+			detected++
+			s.updateDetectionProgress(detected, total)
+		}
 	}
 }

@@ -18,13 +18,17 @@ PHOTO_ROOT=/absolute/path/to/photos docker compose up --build
 
 Open http://localhost:8080 and choose **Index photos** or **Reindex all**. The source directory is mounted
 read-only. Files retain their directory structure; Fast Fotos stores relative paths,
-extracted capture time/GPS coordinates, and 400px JPEG thumbnails in SQLite.
+extracted capture time/GPS coordinates, and JPEG thumbnails in SQLite (640px maximum
+dimension by default).
 Indexing continues in the background if you refresh or navigate away; its progress and a stop control remain
 available in the header.
 
 Indexing uses a bounded worker pool. Set `INDEX_WORKER` to control concurrency and
 `RESIZE_FILTER` to choose `bilinear` (default), `approx-bilinear`, or `catmull-rom`
-thumbnail resizing.
+thumbnail resizing. `THUMBNAIL_MAX_DIMENSION` controls the maximum thumbnail side
+(default `640`).
+Set `LOG_LEVEL` to `debug`, `info` (default), `warn`, or `error` to control application
+log verbosity. Application logs are written to stdout.
 
 Compose installs the default offline reverse-geocoding provider automatically on
 startup when the data is missing:
@@ -68,8 +72,9 @@ When an associated raw file is present beside the image, the image page shows a
 The Compose image also provisions ONNX Runtime 1.29.0 and the offline object-detection runtime and
 YOLOv11 Small model into the persistent `fast-fotos-models` volume. Set
 `OBJECT_AUTO_INSTALL=false` to disable this download; `OBJECT_MODEL_DIR` controls
-the model directory. During indexing, the detector runs against each generated
-thumbnail and stores distinct high-confidence COCO labels such as `Person` and
+the model directory. Detection is separate from indexing: in the background, and only
+while indexing is idle, the detector runs against the thumbnail of every photo not yet
+processed (it is interrupted whenever indexing starts and resumes afterwards) and stores distinct high-confidence COCO labels such as `Person` and
 `Bicycle` with the photo.
 
 After enabling GeoNames for an existing database, run **Reindex all** once so

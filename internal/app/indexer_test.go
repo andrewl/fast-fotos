@@ -29,7 +29,7 @@ func TestCreateThumbnailResizesAndEncodesJPEG(t *testing.T) {
 		t.Fatalf("close source image: %v", err)
 	}
 
-	thumbnail, err := createThumbnail(path, "bilinear")
+	thumbnail, err := createThumbnail(path, "bilinear", defaultThumbnailMaxDimension)
 	if err != nil {
 		t.Fatalf("create thumbnail: %v", err)
 	}
@@ -40,8 +40,27 @@ func TestCreateThumbnailResizesAndEncodesJPEG(t *testing.T) {
 	if format != "jpeg" {
 		t.Errorf("thumbnail format = %q, want jpeg", format)
 	}
-	if decoded.Width != thumbnailMaxDimension || decoded.Height != thumbnailMaxDimension/2 {
-		t.Errorf("thumbnail dimensions = %dx%d, want %dx%d", decoded.Width, decoded.Height, thumbnailMaxDimension, thumbnailMaxDimension/2)
+	if decoded.Width != defaultThumbnailMaxDimension || decoded.Height != defaultThumbnailMaxDimension/2 {
+		t.Errorf("thumbnail dimensions = %dx%d, want %dx%d", decoded.Width, decoded.Height, defaultThumbnailMaxDimension, defaultThumbnailMaxDimension/2)
+	}
+}
+
+func TestCreateThumbnailUsesConfiguredMaxDimension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.jpg")
+	if err := os.WriteFile(path, jpegData(t, image.NewRGBA(image.Rect(0, 0, 1600, 800))), 0o644); err != nil {
+		t.Fatalf("write source image: %v", err)
+	}
+
+	thumbnail, err := createThumbnail(path, "bilinear", 800)
+	if err != nil {
+		t.Fatalf("create thumbnail: %v", err)
+	}
+	decoded, _, err := image.DecodeConfig(bytes.NewReader(thumbnail))
+	if err != nil {
+		t.Fatalf("decode thumbnail: %v", err)
+	}
+	if decoded.Width != 800 || decoded.Height != 400 {
+		t.Errorf("thumbnail dimensions = %dx%d, want 800x400", decoded.Width, decoded.Height)
 	}
 }
 
@@ -53,7 +72,7 @@ func TestCreateThumbnailPrefersEmbeddedJPEGThumbnail(t *testing.T) {
 		t.Fatalf("write JPEG with embedded thumbnail: %v", err)
 	}
 
-	thumbnail, err := createThumbnail(path, "bilinear")
+	thumbnail, err := createThumbnail(path, "bilinear", defaultThumbnailMaxDimension)
 	if err != nil {
 		t.Fatalf("create thumbnail: %v", err)
 	}

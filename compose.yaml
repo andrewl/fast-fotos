@@ -13,6 +13,8 @@ services:
       OBJECT_AUTO_INSTALL: "true"
       ONNX_INTRA_OP_THREADS: 2
       ONNX_INTER_OP_THREADS: 1
+      THUMBNAIL_MAX_DIMENSION: 416
+      LOG_LEVEL: warn
     volumes:
       - ./pf:/photos
       - ./fast-fotos-geonames:/geonames

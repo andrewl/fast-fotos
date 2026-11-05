@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,9 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log/slog"
 	"math"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,8 +24,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"database/sql"
-	"log/slog"
 
 	"github.com/andrewl/fast-fotos/internal/geocode"
 	"github.com/andrewl/fast-fotos/internal/objects"
@@ -44,6 +45,11 @@ type Server struct {
 	indexCancel     context.CancelFunc
 	geocoder        geocode.Provider
 	detector        objects.Detector
+	detectMu        sync.Mutex
+	detectCancel    context.CancelFunc
+	detectDone      chan struct{}
+	detectProgress  DetectionProgress
+	closing         bool
 }
 
 // LocationGroup represents a named geographical area (settlement or region) and its photo count.
@@ -63,6 +69,15 @@ type MapBounds struct {
 
 // IndexProgress tracks background photo indexing state and completion percentage.
 type IndexProgress struct {
+	Active     bool              `json:"active"`
+	Processed  int               `json:"processed"`
+	Total      int               `json:"total"`
+	Percentage int               `json:"percentage"`
+	Message    string            `json:"message"`
+	Detection  DetectionProgress `json:"detection"`
+}
+
+type DetectionProgress struct {
 	Active     bool   `json:"active"`
 	Processed  int    `json:"processed"`
 	Total      int    `json:"total"`
@@ -89,6 +104,7 @@ type Photo struct {
 	MediaType       string
 	DurationSeconds *float64
 	DayOfYear       int
+	GoldenHour      bool
 }
 
 // IsVideo reports whether the photo record represents a video file rather than a still image.
@@ -115,9 +131,9 @@ type PageData struct {
 	Photos             []Photo
 	Photo              *Photo
 	Months             []Month
-	Collections          []Collection
+	Collections        []Collection
 	SelectedMonth      string
-	Collection            *Collection
+	Collection         *Collection
 	PhotoRoot          string
 	Locations          []LocationGroup
 	SelectedLocation   string
@@ -198,11 +214,58 @@ func NewServer(ctx context.Context, config Config) (*Server, error) {
 		db.Close()
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
+	server.startDetection()
 	return server, nil
+}
+
+// startDetection launches background object detection unless it is already running, indexing is active, or no detector is loaded.
+func (s *Server) startDetection() {
+	if s.detector == nil {
+		return
+	}
+	s.indexProgressMu.RLock()
+	indexing := s.indexCancel != nil
+	s.indexProgressMu.RUnlock()
+	s.detectMu.Lock()
+	defer s.detectMu.Unlock()
+	if indexing || s.closing || s.detectCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.detectCancel, s.detectDone = cancel, done
+	s.detectProgress = DetectionProgress{Active: true, Message: "Object detection: preparing photos..."}
+	go func() {
+		defer close(done)
+		s.detectObjects(ctx)
+		s.detectMu.Lock()
+		if s.detectDone == done {
+			s.detectCancel, s.detectDone = nil, nil
+			s.detectProgress.Active = false
+		}
+		s.detectMu.Unlock()
+		cancel()
+	}()
+}
+
+// stopDetection cancels any running object detection and waits for it to stop.
+func (s *Server) stopDetection() {
+	s.detectMu.Lock()
+	cancel, done := s.detectCancel, s.detectDone
+	s.detectMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	<-done
 }
 
 // Close closes underlying database pools and releases object detector resources.
 func (s *Server) Close() {
+	s.detectMu.Lock()
+	s.closing = true
+	s.detectMu.Unlock()
+	s.stopDetection()
 	if detector, ok := s.detector.(interface{ Close() error }); ok {
 		_ = detector.Close()
 	}
@@ -597,7 +660,6 @@ func (s *Server) thisweek(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "thisweek", PageData{Photos: photos})
 }
 
-
 // locations renders the interactive Leaflet map and location selection sidebar.
 func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 	locationGroups, err := s.db.LocationGroups(r.Context())
@@ -667,7 +729,7 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 	}
 	zoom, err := strconv.Atoi(query.Get("zoom"))
 	if err != nil || zoom < 0 || zoom > 22 || minLatitude < -90 || maxLatitude > 90 ||
-	minLongitude < -180 || maxLongitude > 180 || minLatitude >= maxLatitude || minLongitude >= maxLongitude {
+		minLongitude < -180 || maxLongitude > 180 || minLatitude >= maxLatitude || minLongitude >= maxLongitude {
 
 		slog.Error("Invalid map bounds or zoom level", "minLat", minLatitude, "maxLat", maxLatitude,
 			"minLng", minLongitude, "maxLng", maxLongitude, "zoom", zoom, "error", err)
@@ -781,7 +843,6 @@ func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "collections", PageData{Collections: collections})
 }
 */
-
 
 // gallery renders the detail grid page for a collection
 func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
@@ -1005,8 +1066,11 @@ func (s *Server) startIndexing(index func(context.Context) (int, error)) bool {
 		return false
 	}
 	go func() {
+		// Indexing takes priority: stop detection before it starts.
+		s.stopDetection()
 		count, err := index(ctx)
 		s.finishIndexing(count, err)
+		s.startDetection()
 	}()
 	slog.Info("Started background indexing operation")
 	return true
@@ -1082,8 +1146,21 @@ func (s *Server) finishIndexing(count int, err error) {
 // currentIndexProgress returns a copy of current IndexProgress.
 func (s *Server) currentIndexProgress() IndexProgress {
 	s.indexProgressMu.RLock()
-	defer s.indexProgressMu.RUnlock()
-	return s.indexProgress
+	progress := s.indexProgress
+	s.indexProgressMu.RUnlock()
+	s.detectMu.Lock()
+	progress.Detection = s.detectProgress
+	s.detectMu.Unlock()
+	return progress
+}
+
+func (s *Server) updateDetectionProgress(processed, total int) {
+	s.detectMu.Lock()
+	s.detectProgress.Processed = processed
+	s.detectProgress.Total = total
+	s.detectProgress.Percentage = percentage(processed, total)
+	s.detectProgress.Message = "Object detection in progress..."
+	s.detectMu.Unlock()
 }
 
 // percentage calculates integer percentage processed of total.
@@ -1156,8 +1233,6 @@ func (s *Server) thumbnailFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, path+".jpg", time.Time{}, bytes.NewReader(thumbnail))
 }
 
-
-
 // download streams a zip archive containing photos from a specific collection and optional raw files.
 // the photo ids are passed in the query string as a comma-separated list, e.g., /download/abc123?ids=1,2,3
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {
@@ -1170,7 +1245,6 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid photo ids", http.StatusBadRequest)
 		return
 	}
-
 
 	//if the query string contains raw=true, include the raw files in the zip archive
 	includeRaw := r.URL.Query().Get("raw") == "true"
@@ -1277,7 +1351,59 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 		slog.Error("Error querying photos for this week: ", "err", err)
 		return nil, err
 	}
-	return s.db.PhotosByIDs(ctx, photoIDs)
+	photos, err := s.db.PhotosByIDs(ctx, photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	return selectWeeklyPhotos(photos, 10), nil
+}
+
+func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
+	if limit <= 0 || len(photos) == 0 {
+		return nil
+	}
+	candidates := append([]Photo(nil), photos...)
+	mathrand.Shuffle(len(candidates), func(i, j int) {
+		candidates[i], candidates[j] = candidates[j], candidates[i]
+	})
+
+	selected := make([]Photo, 0, min(limit, len(candidates)))
+	used := make([]bool, len(candidates))
+	subjects := make(map[string]bool)
+	for len(selected) < limit && len(selected) < len(candidates) {
+		bestIndex, bestScore := -1, -1.0
+		for i, photo := range candidates {
+			if used[i] {
+				continue
+			}
+			score := 0.0
+			if photo.GoldenHour {
+				score += 0.5
+			}
+			seenInPhoto := make(map[string]bool)
+			for _, subject := range photo.Objects {
+				subject = strings.ToLower(strings.TrimSpace(subject))
+				if subject != "" && !subjects[subject] && !seenInPhoto[subject] {
+					score++
+					seenInPhoto[subject] = true
+				}
+			}
+			if score > bestScore {
+				bestIndex, bestScore = i, score
+			}
+		}
+
+		photo := candidates[bestIndex]
+		used[bestIndex] = true
+		selected = append(selected, photo)
+		for _, subject := range photo.Objects {
+			subject = strings.ToLower(strings.TrimSpace(subject))
+			if subject != "" {
+				subjects[subject] = true
+			}
+		}
+	}
+	return selected
 }
 
 // render executes a named HTML template with PageData context and writes the output response.
@@ -1315,16 +1441,16 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"urlquery":         url.QueryEscape,
 	}
 	pages := map[string][]string{
-		"home":           {"templates/base.html", "templates/home.html", "templates/gallery.html"},
-		"image":          {"templates/base.html", "templates/image.html", "templates/gallery.html"},
-		"search":         {"templates/base.html", "templates/search.html", "templates/gallery.html"},
-		"maintenance":    {"templates/base.html", "templates/maintenance.html"},
-		"gallery":        {"templates/gallery.html"},
-		"locations":      {"templates/base.html", "templates/locations.html"},
-		"cluster":        {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
-		"collections":    {"templates/base.html", "templates/collections.html"},
-		"collection": {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
-		"thisweek": {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
+		"home":        {"templates/base.html", "templates/home.html", "templates/gallery.html"},
+		"image":       {"templates/base.html", "templates/image.html", "templates/gallery.html"},
+		"search":      {"templates/base.html", "templates/search.html", "templates/gallery.html"},
+		"maintenance": {"templates/base.html", "templates/maintenance.html"},
+		"gallery":     {"templates/gallery.html"},
+		"locations":   {"templates/base.html", "templates/locations.html"},
+		"cluster":     {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
+		"collections": {"templates/base.html", "templates/collections.html"},
+		"collection":  {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
+		"thisweek":    {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {

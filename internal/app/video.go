@@ -12,9 +12,6 @@ import (
 	"time"
 )
 
-// videoThumbnailMaxDimension bounds the largest side of a generated video thumbnail, matching photo thumbnails.
-const videoThumbnailMaxDimension = thumbnailMaxDimension
-
 var videoExtensions = map[string]bool{
 	".3gp": true, ".avi": true, ".flv": true, ".m4v": true, ".mkv": true,
 	".mov": true, ".mp4": true, ".mpeg": true, ".mpg": true, ".mts": true,
@@ -128,9 +125,9 @@ func parseISO6709(value string) (float64, float64, bool) {
 	return latitude, longitude, true
 }
 
-// createVideoThumbnail extracts a representative JPEG frame from a video file using ffmpeg, scaled to fit within videoThumbnailMaxDimension.
-func createVideoThumbnail(ctx context.Context, path string) ([]byte, error) {
-	scale := fmt.Sprintf("thumbnail,scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease", videoThumbnailMaxDimension, videoThumbnailMaxDimension)
+// createVideoThumbnail extracts a representative JPEG frame from a video file using ffmpeg, scaled to fit within maxDimension.
+func createVideoThumbnail(ctx context.Context, path string, maxDimension int) ([]byte, error) {
+	scale := fmt.Sprintf("thumbnail,scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease", maxDimension, maxDimension)
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-v", "error",
 		"-i", path,

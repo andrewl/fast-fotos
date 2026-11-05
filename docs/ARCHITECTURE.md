@@ -14,6 +14,7 @@ The `fast-fotos` executable reads:
 | `PHOTO_ROOT` | Yes | - | Absolute path to the source photo library |
 | `LISTEN_ADDR` | No | `:8090` | HTTP listener address |
 | `INDEX_WORKER` | No | Up to 4, limited by `GOMAXPROCS` | Maximum number of images processed concurrently |
+| `THUMBNAIL_MAX_DIMENSION` | No | `640` | Maximum width or height of generated photo and video thumbnails |
 | `RESIZE_FILTER` | No | `bilinear` | Thumbnail filter: `bilinear`, `approx-bilinear`, or `catmull-rom` |
 | `ONNX_INTRA_OP_THREADS` | No | `0` (ONNX Runtime default) | Threads used within a single ONNX graph node |
 | `ONNX_INTER_OP_THREADS` | No | `0` (ONNX Runtime default) | Threads used across ONNX graph nodes |
@@ -31,8 +32,10 @@ that directory must be writable by the container user. The standalone
 `scripts/install-geonames.sh` command can also populate provider data outside Docker.
 Compose also provisions ONNX Runtime 1.29.0 and the YOLOv11 Small object-detection
 model into the persistent `fast-fotos-models` volume. Set `OBJECT_AUTO_INSTALL=false`
-to disable this download; `OBJECT_MODEL_DIR` controls the model directory. During
-indexing, the detector runs against generated thumbnails and stores distinct
+to disable this download; `OBJECT_MODEL_DIR` controls the model directory. Detection
+runs separately from indexing, in the background and only while indexing is idle; starting
+indexing interrupts it and it resumes afterwards. It runs against stored thumbnails of
+photos with no `objects_detected_at` and stores distinct
 high-confidence COCO labels with each photo in `photos.objects`.
 
 The application is organized under `internal/app`:

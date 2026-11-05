@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -38,6 +39,38 @@ func TestValidMonth(t *testing.T) {
 		if actual := validMonth(test.value); actual != test.valid {
 			t.Errorf("validMonth(%q) = %t, want %t", test.value, actual, test.valid)
 		}
+	}
+}
+
+func TestSelectWeeklyPhotosPrefersGoldenHourAndVariedSubjects(t *testing.T) {
+	photos := make([]Photo, 12)
+	for i := range photos {
+		photos[i] = Photo{
+			ID:         int64(i + 1),
+			Objects:    []string{"subject-" + strconv.Itoa(i)},
+			GoldenHour: i < 5,
+		}
+	}
+
+	selected := selectWeeklyPhotos(photos, 10)
+	if len(selected) != 10 {
+		t.Fatalf("selected %d photos, want 10", len(selected))
+	}
+	goldenHourCount := 0
+	subjects := make(map[string]bool)
+	for _, photo := range selected {
+		if photo.GoldenHour {
+			goldenHourCount++
+		}
+		for _, subject := range photo.Objects {
+			subjects[subject] = true
+		}
+	}
+	if goldenHourCount == 0 {
+		t.Error("selected no golden-hour photos")
+	}
+	if len(subjects) < 8 {
+		t.Errorf("selected only %d distinct subjects, want at least 8", len(subjects))
 	}
 }
 

@@ -269,6 +269,7 @@ function setIndexingControls(active) {
 
 function updateIndexProgress() {
   const status = document.querySelector("#index-progress");
+  const detectionStatus = document.querySelector("#detection-progress");
   if (!status) {
     console.warn("No index progress element found");
     return;
@@ -286,14 +287,26 @@ function updateIndexProgress() {
         status.textContent = progress.total === 0
           ? progress.message
           : `Indexing: ${progress.processed} / ${progress.total} (${progress.percentage}%)`;
+      } else {
+        status.hidden = !progress.message;
+        status.textContent = progress.message;
+      }
+      const detection = progress.detection;
+      if (detectionStatus && detection && detection.active) {
+        detectionStatus.hidden = false;
+        detectionStatus.textContent = detection.total === 0
+          ? detection.message
+          : `Object detection: ${detection.processed} / ${detection.total} (${detection.percentage}%)`;
+      } else if (detectionStatus) {
+        detectionStatus.hidden = true;
+      }
+      if (progress.active || (detection && detection.active)) {
         if (!indexProgressTimer) {
           indexProgressTimer = window.setInterval(updateIndexProgress, 500);
         }
       } else {
         window.clearInterval(indexProgressTimer);
         indexProgressTimer = undefined;
-        status.hidden = !progress.message;
-        status.textContent = progress.message;
       }
     })
     .catch(() => {

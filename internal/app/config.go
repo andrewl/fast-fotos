@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -10,13 +11,15 @@ import (
 
 // Config holds configuration parameters for running the application.
 type Config struct {
-	DatabasePath   string
-	PhotoRoot      string
-	ListenAddress  string
-	IndexWorkers   int
-	ResizeFilter   string
-	GeoNamesDir    string
-	ObjectModelDir string
+	DatabasePath          string
+	PhotoRoot             string
+	ListenAddress         string
+	LogLevel              slog.Level
+	IndexWorkers          int
+	ThumbnailMaxDimension int
+	ResizeFilter          string
+	GeoNamesDir           string
+	ObjectModelDir        string
 	// ONNX thread counts; 0 uses the ONNX Runtime default.
 	ONNXIntraOpThreads int
 	ONNXInterOpThreads int
@@ -25,13 +28,15 @@ type Config struct {
 // ConfigFromEnvironment loads and validates application configuration settings from environment variables.
 func ConfigFromEnvironment() (Config, error) {
 	config := Config{
-		DatabasePath:   os.Getenv("DATABASE_PATH"),
-		PhotoRoot:      os.Getenv("PHOTO_ROOT"),
-		ListenAddress:  os.Getenv("LISTEN_ADDR"),
-		IndexWorkers:   defaultIndexWorkers(),
-		ResizeFilter:   "bilinear",
-		GeoNamesDir:    os.Getenv("GEONAMES_DIR"),
-		ObjectModelDir: os.Getenv("OBJECT_MODEL_DIR"),
+		DatabasePath:          os.Getenv("DATABASE_PATH"),
+		PhotoRoot:             os.Getenv("PHOTO_ROOT"),
+		ListenAddress:         os.Getenv("LISTEN_ADDR"),
+		LogLevel:              slog.LevelInfo,
+		IndexWorkers:          defaultIndexWorkers(),
+		ThumbnailMaxDimension: defaultThumbnailMaxDimension,
+		ResizeFilter:          "bilinear",
+		GeoNamesDir:           os.Getenv("GEONAMES_DIR"),
+		ObjectModelDir:        os.Getenv("OBJECT_MODEL_DIR"),
 	}
 	if config.DatabasePath == "" {
 		config.DatabasePath = "fast-fotos.db"
@@ -42,12 +47,33 @@ func ConfigFromEnvironment() (Config, error) {
 	if config.ListenAddress == "" {
 		config.ListenAddress = ":8090"
 	}
+	if value := os.Getenv("LOG_LEVEL"); value != "" {
+		switch strings.ToLower(value) {
+		case "debug":
+			config.LogLevel = slog.LevelDebug
+		case "info":
+			config.LogLevel = slog.LevelInfo
+		case "warn":
+			config.LogLevel = slog.LevelWarn
+		case "error":
+			config.LogLevel = slog.LevelError
+		default:
+			return Config{}, errors.New("LOG_LEVEL must be debug, info, warn, or error")
+		}
+	}
 	if value := os.Getenv("INDEX_WORKER"); value != "" {
 		workers, err := strconv.Atoi(value)
 		if err != nil || workers < 1 {
 			return Config{}, errors.New("INDEX_WORKER must be a positive integer")
 		}
 		config.IndexWorkers = workers
+	}
+	if value := os.Getenv("THUMBNAIL_MAX_DIMENSION"); value != "" {
+		dimension, err := strconv.Atoi(value)
+		if err != nil || dimension < 1 {
+			return Config{}, errors.New("THUMBNAIL_MAX_DIMENSION must be a positive integer")
+		}
+		config.ThumbnailMaxDimension = dimension
 	}
 	if value := os.Getenv("RESIZE_FILTER"); value != "" {
 		config.ResizeFilter = strings.ToLower(value)
