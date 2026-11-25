@@ -25,14 +25,16 @@ function toggleOne(id) {
   const input = document.querySelector(`[data-photo-selection][value="${id}"]`);
   if (input) {
     input.checked = !input.checked;
+    persistSelection([String(input.value).trim()], input.checked);
   }
   updateActionMenu();
 }
 
 //persists selection changes to the reserved selected gallery
 function persistSelection(ids, selected) {
-  if (ids.length === 0) return;
-  const body = new URLSearchParams({ ids: ids.join(",") });
+  const validIDs = ids.map((id) => String(id).trim()).filter((id) => /^\d+$/.test(id));
+  if (validIDs.length === 0) return;
+  const body = new URLSearchParams({ ids: validIDs.join(",") });
   fetch("/selection", { method: selected ? "POST" : "DELETE", body }).catch((error) => {
     console.error("Could not save selection", error);
   });
@@ -41,7 +43,8 @@ function persistSelection(ids, selected) {
 function setPageSelection(selected) {
   const ids = [];
   document.querySelectorAll("[data-photo-selection]").forEach((input) => {
-    if (input.checked !== selected) ids.push(input.value);
+    const id = String(input.value).trim();
+    if (/^\d+$/.test(id) && input.checked !== selected) ids.push(id);
     input.checked = selected;
   });
   persistSelection(ids, selected);
@@ -71,7 +74,16 @@ document.addEventListener("DOMContentLoaded", () => {
   //adds an eventlistener to each checkbox with the data-photo-selection attribute to update the action menu when the checkbox is changed
   document.addEventListener("change", (event) => {
     if (!event.target.matches("[data-photo-selection]")) return;
-    persistSelection([event.target.value], event.target.checked);
+    const photoID = String(event.target.value).trim();
+    persistSelection([photoID], event.target.checked);
+    const match = window.location.pathname.match(/^\/galleries\/(\d+)/);
+    if (match && match[1] === "1" && !event.target.checked) {
+      const body = new URLSearchParams({ ids: photoID });
+      fetch("/galleries/1/remove", { method: "POST", body }).catch((error) => {
+        console.error("Could not remove photo from selected gallery", error);
+      });
+      event.target.closest(".photo")?.remove();
+    }
     updateActionMenu();
   });
 

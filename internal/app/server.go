@@ -320,6 +320,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /selection", s.selectPhotos)
 	mux.HandleFunc("DELETE /selection", s.unselectPhotos)
 	mux.HandleFunc("POST /selection/clear", s.clearSelection)
+	mux.HandleFunc("POST /galleries/1/remove", s.removeSelectedGalleryPhotos)
 	mux.HandleFunc("POST /saved-searches", s.saveSearch)
 	mux.HandleFunc("DELETE /saved-searches/", s.deleteSavedSearch)
 	mux.HandleFunc("GET /similar/", s.similarCollection)
@@ -958,11 +959,18 @@ func (s *Server) renderCollectionPhoto(w http.ResponseWriter, r *http.Request, i
 			otherCollections = append(otherCollections, gallery)
 		}
 	}
+	selected, err := s.db.SelectedPhotoIDs(r.Context())
+	if err != nil {
+		slog.Error("Failed to load selected photos", "error", err)
+		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
+		return
+	}
 	s.render(w, "image", PageData{
 		Page: "image", Photo: &photo, Collections: galleries, OtherCollections: otherCollections,
 		PhotoCollections: photoCollections, ReturnURL: returnURL, CollectionName: collectionName,
 		PreviousPhotoID: previousID, NextPhotoID: nextID,
-		MapURL: mapURLForCollectionPhoto(returnURL, photo),
+		MapURL:   mapURLForCollectionPhoto(returnURL, photo),
+		Selected: selected,
 	})
 }
 
@@ -1497,7 +1505,13 @@ func (s *Server) galleryPage(w http.ResponseWriter, r *http.Request) {
 		s.renderCollectionPhoto(w, r, photoID, fmt.Sprintf("/galleries/%d", id), collection.Name, photos)
 		return
 	}
-	s.render(w, "collection", PageData{Collections: collections, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
+	selected, err := s.db.SelectedPhotoIDs(r.Context())
+	if err != nil {
+		slog.Error("Failed to load selected photos", "error", err)
+		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "collection", PageData{Page: "galleries", Collections: collections, Collection: &collection, Photos: photos, Selected: selected, ReturnURL: r.URL.Path})
 }
 
 // similarCollection renders a conceptual collection of photos similar to a target photo.
@@ -1753,7 +1767,12 @@ func (s *Server) unselectPhotos(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) changeSelection(w http.ResponseWriter, r *http.Request, change func(context.Context, []int64) error) {
-	photoIDs, err := parseIDList(r.FormValue("ids"))
+	ids := strings.TrimSpace(r.FormValue("ids"))
+	if ids == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	photoIDs, err := parseIDList(ids)
 	if err != nil {
 		slog.Error("Invalid photo IDs provided for selection", "error", err)
 		http.Error(w, "Invalid photo selection", http.StatusBadRequest)
@@ -1768,6 +1787,25 @@ func (s *Server) changeSelection(w http.ResponseWriter, r *http.Request, change 
 }
 
 // clearSelection empties the selected collection.
+func (s *Server) removeSelectedGalleryPhotos(w http.ResponseWriter, r *http.Request) {
+	ids := strings.TrimSpace(r.FormValue("ids"))
+	if ids == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	photoIDs, err := parseIDList(ids)
+	if err != nil {
+		http.Error(w, "Invalid photo selection", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.UnselectPhotos(r.Context(), photoIDs); err != nil {
+		slog.Error("Failed to remove photos from selected gallery", "error", err)
+		http.Error(w, "Could not remove photos from selected gallery", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.ClearSelection(r.Context()); err != nil {
 		slog.Error("Failed to clear selection", "error", err)

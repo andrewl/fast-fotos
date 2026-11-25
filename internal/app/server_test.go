@@ -17,6 +17,87 @@ import (
 )
 
 // TestParseTemplates tests parsing all embedded template files.
+func TestRemoveSelectedGalleryPhoto(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SelectPhotos(ctx, []int64{19}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db}
+	request := httptest.NewRequest(http.MethodPost, "/galleries/1/remove", strings.NewReader("ids=19"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	server.removeSelectedGalleryPhotos(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("remove selected status = %d", response.Code)
+	}
+	selected, err := db.SelectedPhotoIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected[19] {
+		t.Fatal("photo 19 remained selected")
+	}
+}
+
+func TestChangeSelectionIgnoresEmptyIDs(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := &Server{db: db}
+	request := httptest.NewRequest(http.MethodPost, "/selection", strings.NewReader("ids="))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	server.changeSelection(response, request, db.SelectPhotos)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("empty selection status = %d, want 204", response.Code)
+	}
+}
+
+func TestGalleryPageIncludesSelectionState(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if err := db.UpsertPhoto(ctx, PhotoRecord{Path: "a.jpg", TakenAt: base, MediaType: "photo", IndexedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	galleryID, err := db.CreateGallery(ctx, "Test gallery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddPhotosToGallery(ctx, galleryID, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SelectPhotos(ctx, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/galleries/"+strconv.FormatInt(galleryID, 10), nil)
+	response := httptest.NewRecorder()
+	server.galleryPage(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gallery status = %d", response.Code)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`value="1" checked`)) {
+		t.Fatalf("gallery response did not reflect selected photo")
+	}
+}
+
 func TestSidebarAndSearchPageRendering(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
