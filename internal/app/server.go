@@ -50,6 +50,7 @@ type Server struct {
 	detectDone      chan struct{}
 	detectProgress  DetectionProgress
 	closing         bool
+	dlnaCancel      context.CancelFunc
 }
 
 // LocationGroup represents a named geographical area (settlement or region) and its photo count.
@@ -277,6 +278,10 @@ func (s *Server) Close() {
 	s.closing = true
 	s.detectMu.Unlock()
 	s.stopDetection()
+	if s.dlnaCancel != nil {
+		s.dlnaCancel()
+		s.dlnaCancel = nil
+	}
 	if detector, ok := s.detector.(interface{ Close() error }); ok {
 		_ = detector.Close()
 	}
@@ -286,6 +291,12 @@ func (s *Server) Close() {
 // Routes constructs and returns an http.Handler with all application endpoints configured.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	s.startDLNADiscovery()
+	mux.HandleFunc("GET /dlna/description.xml", s.dlnaDescription)
+	mux.HandleFunc("GET /dlna/contentdirectory.xml", s.dlnaContentDirectoryDescription)
+	mux.HandleFunc("GET /dlna/resource/", s.dlnaResource)
+	mux.HandleFunc("GET /dlna/thumbnail/", s.dlnaThumbnail)
+	mux.HandleFunc("POST /dlna/control", s.dlnaControl)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(mustSub(staticFiles, "static"))))
 	mux.HandleFunc("GET /", s.home)
 	mux.HandleFunc("GET /timeline/", s.timeline)
