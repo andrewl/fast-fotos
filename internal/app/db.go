@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -21,6 +22,13 @@ const SelectedCollectionName = "selected"
 
 // ErrProtectedCollection is returned when attempting to delete the selected collection.
 var ErrProtectedCollection = errors.New("the selected collection cannot be deleted")
+
+// SavedSearch represents criteria persisted for later reuse.
+type SavedSearch struct {
+	ID    int64
+	URL   string
+	Title string
+}
 
 // DB wraps the SQLite database. All SQL used by the application lives in this file.
 type DB struct {
@@ -115,6 +123,13 @@ func (d *DB) migrate(ctx context.Context) error {
 			photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
 			PRIMARY KEY (collection_id, photo_id)
 		);
+		CREATE TABLE IF NOT EXISTS saved_searches (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			url TEXT NOT NULL UNIQUE CHECK (length(trim(url)) > 0),
+			title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f000', 'now')),
+			UNIQUE(url)
+		);
 		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
 		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
 			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
@@ -133,8 +148,72 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.addColumnIfMissing(ctx, "photos", "objects_detected_at", "TEXT"); err != nil {
 		return err
 	}
+	if err := d.addColumnIfMissing(ctx, "photos", "x", "REAL"); err != nil {
+		return err
+	}
+	if err := d.addColumnIfMissing(ctx, "photos", "y", "REAL"); err != nil {
+		return err
+	}
+	if err := d.populateMercatorCoordinates(ctx); err != nil {
+		return err
+	}
 	if _, err := d.sql.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS photos_golden_hour_idx ON photos (golden_hour)`); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+	return nil
+}
+
+// EPSG900913Project converts WGS84 latitude/longitude into metres in EPSG:900913.
+func EPSG900913Project(latitude, longitude float64) (x, y float64) {
+	const earthRadius = 6378137.0
+	const maxMercatorLatitude = 85.05112878
+	if latitude > maxMercatorLatitude {
+		latitude = maxMercatorLatitude
+	} else if latitude < -maxMercatorLatitude {
+		latitude = -maxMercatorLatitude
+	}
+	radians := math.Pi / 180.0
+	x = earthRadius * longitude * radians
+	y = earthRadius * math.Log(math.Tan(math.Pi/4.0+(latitude*radians)/2.0))
+	return x, y
+}
+
+// populateMercatorCoordinates backfills x/y for existing geotagged photo records.
+func (d *DB) populateMercatorCoordinates(ctx context.Context) error {
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, latitude, longitude FROM photos
+		WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+			AND (x IS NULL OR y IS NULL)`)
+	if err != nil {
+		return fmt.Errorf("migrate mercator coordinates: %w", err)
+	}
+	type coordinate struct {
+		id        int64
+		latitude  float64
+		longitude float64
+	}
+	var coordinates []coordinate
+	for rows.Next() {
+		var item coordinate
+		if err := rows.Scan(&item.id, &item.latitude, &item.longitude); err != nil {
+			rows.Close()
+			return fmt.Errorf("migrate mercator coordinates: %w", err)
+		}
+		coordinates = append(coordinates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("migrate mercator coordinates: %w", err)
+	}
+	for _, item := range coordinates {
+		x, y := EPSG900913Project(item.latitude, item.longitude)
+		if _, err := d.sql.ExecContext(ctx,
+			`UPDATE photos SET x = ?, y = ? WHERE id = ?`, x, y, item.id); err != nil {
+			return fmt.Errorf("migrate mercator coordinates: %w", err)
+		}
+	}
+	_, err = d.sql.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS photos_xy_idx ON photos (x, y) WHERE x IS NOT NULL AND y IS NOT NULL`)
+	if err != nil {
+		return fmt.Errorf("migrate mercator coordinates: %w", err)
 	}
 	return nil
 }
@@ -399,20 +478,25 @@ func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 	if len(p.Thumbnail) > 0 {
 		thumbnail = p.Thumbnail
 	}
+	var x, y any
+	if p.Latitude != nil && p.Longitude != nil {
+		mercatorX, mercatorY := EPSG900913Project(*p.Latitude, *p.Longitude)
+		x, y = mercatorX, mercatorY
+	}
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
-		VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO UPDATE
-		SET taken_at = excluded.taken_at, latitude = excluded.latitude, longitude = excluded.longitude,
+	_, err = tx.ExecContext(ctx, `INSERT INTO photos (path, raw_path, taken_at, latitude, longitude, x, y, thumbnail, location, location_source, settlement, region, country, camera_model, focal_length, flash_fired, dominant_colors, media_type, duration_seconds, indexed_at, day_of_year)
+		VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO UPDATE
+		SET taken_at = excluded.taken_at, latitude = excluded.latitude, longitude = excluded.longitude, x = excluded.x, y = excluded.y,
 		raw_path = excluded.raw_path, thumbnail = COALESCE(excluded.thumbnail, photos.thumbnail), location = excluded.location, location_source = excluded.location_source,
 			settlement = excluded.settlement, region = excluded.region, country = excluded.country,
 			camera_model = excluded.camera_model, focal_length = excluded.focal_length,
 			flash_fired = excluded.flash_fired, dominant_colors = excluded.dominant_colors,
 			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL, objects_detected_at = NULL`,
-		p.Path, p.RawPath, formatTime(p.TakenAt), p.Latitude, p.Longitude, thumbnail, p.Location, p.LocationSource,
+		p.Path, p.RawPath, formatTime(p.TakenAt), p.Latitude, p.Longitude, x, y, thumbnail, p.Location, p.LocationSource,
 		p.Settlement, p.Region, p.Country, p.CameraModel, p.FocalLength, p.FlashFired,
 		encodeStrings(p.DominantColors), p.MediaType, p.DurationSeconds,
 		formatTime(p.IndexedAt), p.DayOfYear)
@@ -420,6 +504,11 @@ func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// DeleteGallery deletes a user gallery.
+func (d *DB) DeleteGallery(ctx context.Context, id int64) error {
+	return d.DeleteCollection(ctx, id)
 }
 
 // PendingDetection is a photo awaiting object detection.
@@ -493,7 +582,10 @@ func (d *DB) DeriveNearbyLocations(ctx context.Context) error {
 			settlement = source.settlement, region = source.region, country = source.country
 		FROM ranked_sources AS source
 		WHERE source.rn = 1 AND source.target_id = target.id`)
-	return err
+	if err != nil {
+		return err
+	}
+	return d.populateMercatorCoordinates(ctx)
 }
 
 // CameraModels returns distinct camera models.
@@ -598,6 +690,31 @@ func (d *DB) LocationBounds(ctx context.Context, settlement, region string) (*Ma
 	return &MapBounds{MinLatitude: *minLat, MinLongitude: *minLng, MaxLatitude: *maxLat, MaxLongitude: *maxLng}, nil
 }
 
+// PlaceBounds resolves a named settlement or region and returns its kind and geotagged photo bounds.
+func (d *DB) PlaceBounds(ctx context.Context, place string) (kind string, bounds *MapBounds, err error) {
+	place = strings.TrimSpace(place)
+	if place == "" {
+		return "", nil, sql.ErrNoRows
+	}
+	var minLat, minLng, maxLat, maxLng *float64
+	err = d.sql.QueryRowContext(ctx, `SELECT
+		CASE WHEN EXISTS (SELECT 1 FROM photos WHERE settlement = ?) THEN 'settlement'
+		     WHEN EXISTS (SELECT 1 FROM photos WHERE region = ?) THEN 'region'
+		     ELSE '' END,
+		MIN(latitude), MIN(longitude), MAX(latitude), MAX(longitude)
+		FROM photos
+		WHERE (settlement = ? OR region = ?)
+		  AND latitude IS NOT NULL AND longitude IS NOT NULL`,
+		place, place, place, place).Scan(&kind, &minLat, &minLng, &maxLat, &maxLng)
+	if err != nil {
+		return "", nil, err
+	}
+	if kind == "" || minLat == nil || minLng == nil || maxLat == nil || maxLng == nil {
+		return "", nil, sql.ErrNoRows
+	}
+	return kind, &MapBounds{MinLatitude: *minLat, MinLongitude: *minLng, MaxLatitude: *maxLat, MaxLongitude: *maxLng}, nil
+}
+
 // MapPoints aggregates geotagged photos into grid cells of cellSize degrees.
 func (d *DB) MapPoints(ctx context.Context, minLat, maxLat, minLng, maxLng, cellSize float64, settlement, region string) ([]mapPoint, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT AVG(latitude), AVG(longitude), COUNT(*), MIN(id),
@@ -616,6 +733,106 @@ func (d *DB) MapPoints(ctx context.Context, minLat, maxLat, minLng, maxLng, cell
 		var point mapPoint
 		if err := rows.Scan(&point.Latitude, &point.Longitude, &point.Count, &point.PhotoID,
 			&point.MinLatitude, &point.MinLongitude, &point.MaxLatitude, &point.MaxLongitude); err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+// MapPointForPhoto returns one map point for a geotagged photo.
+func (d *DB) MapPointForPhoto(ctx context.Context, photoID int64) ([]mapPoint, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT latitude, longitude, 1, id,
+		latitude, longitude, latitude, longitude
+		FROM photos WHERE id = ? AND latitude IS NOT NULL AND longitude IS NOT NULL
+		AND NOT (latitude = 0 AND longitude = 0)`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make([]mapPoint, 0, 1)
+	for rows.Next() {
+		var point mapPoint
+		if err := rows.Scan(&point.Latitude, &point.Longitude, &point.Count, &point.PhotoID,
+			&point.MinLatitude, &point.MinLongitude, &point.MaxLatitude, &point.MaxLongitude); err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+// MapPointsForPhotos returns one point per geotagged photo in an explicit collection ID set.
+func (d *DB) MapPointsForPhotos(ctx context.Context, photoIDs []int64) ([]mapPoint, error) {
+	if len(photoIDs) == 0 {
+		return []mapPoint{}, nil
+	}
+	placeholders, args := idPlaceholders(photoIDs)
+	rows, err := d.sql.QueryContext(ctx, `SELECT latitude, longitude, 1, id,
+		latitude, longitude, latitude, longitude
+		FROM photos WHERE id IN (`+placeholders+`)
+		AND latitude IS NOT NULL AND longitude IS NOT NULL
+		AND NOT (latitude = 0 AND longitude = 0)
+		ORDER BY taken_at ASC, id ASC LIMIT 10000`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make([]mapPoint, 0, len(photoIDs))
+	for rows.Next() {
+		var point mapPoint
+		if err := rows.Scan(&point.Latitude, &point.Longitude, &point.Count, &point.PhotoID,
+			&point.MinLatitude, &point.MinLongitude, &point.MaxLatitude, &point.MaxLongitude); err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+// ClusterPointsForPhotos returns lightweight cluster records for an explicit collection ID set.
+func (d *DB) ClusterPointsForPhotos(ctx context.Context, photoIDs []int64) ([]mapPoint, error) {
+	if len(photoIDs) == 0 {
+		return []mapPoint{}, nil
+	}
+	placeholders, args := idPlaceholders(photoIDs)
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, latitude, longitude, path,
+		strftime('%Y-%m-%dT%H:%M:%SZ', taken_at), COALESCE(location, '')
+		FROM photos WHERE id IN (`+placeholders+`)
+		AND latitude IS NOT NULL AND longitude IS NOT NULL
+		AND NOT (latitude = 0 AND longitude = 0)
+		ORDER BY taken_at ASC, id ASC LIMIT 10000`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	photos := make([]mapPoint, 0, len(photoIDs))
+	for rows.Next() {
+		var point mapPoint
+		if err := rows.Scan(&point.PhotoID, &point.Latitude, &point.Longitude, &point.Path,
+			&point.TakenAt, &point.Location); err != nil {
+			return nil, err
+		}
+		photos = append(photos, point)
+	}
+	return photos, rows.Err()
+}
+
+// ClusterPointForPhoto returns lightweight cluster metadata for one geotagged photo.
+func (d *DB) ClusterPointForPhoto(ctx context.Context, photoID int64) ([]mapPoint, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, latitude, longitude, path,
+		strftime('%Y-%m-%dT%H:%M:%SZ', taken_at), COALESCE(location, '')
+		FROM photos WHERE id = ? AND latitude IS NOT NULL AND longitude IS NOT NULL
+		AND NOT (latitude = 0 AND longitude = 0)`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make([]mapPoint, 0, 1)
+	for rows.Next() {
+		var point mapPoint
+		if err := rows.Scan(&point.PhotoID, &point.Latitude, &point.Longitude, &point.Path,
+			&point.TakenAt, &point.Location); err != nil {
 			return nil, err
 		}
 		points = append(points, point)
@@ -814,6 +1031,11 @@ func (d *DB) Collections(ctx context.Context) ([]Collection, error) {
 	return collections, rows.Err()
 }
 
+// Galleries is the gallery terminology for Collections.
+func (d *DB) Galleries(ctx context.Context) ([]Collection, error) {
+	return d.Collections(ctx)
+}
+
 // CollectionIDsForPhoto returns the set of collection IDs that contain a photo.
 func (d *DB) CollectionIDsForPhoto(ctx context.Context, photoID int64) (map[int64]bool, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT collection_id FROM collection_photos WHERE photo_id = ?`, photoID)
@@ -841,6 +1063,11 @@ func (d *DB) CollectionByID(ctx context.Context, id int64) (Collection, error) {
 	return collection, err
 }
 
+// GalleryByID loads a gallery with compatibility for the previous collection API.
+func (d *DB) GalleryByID(ctx context.Context, id int64) (Collection, error) {
+	return d.CollectionByID(ctx, id)
+}
+
 // CollectionName returns the name of a collection.
 func (d *DB) CollectionName(ctx context.Context, id int64) (string, error) {
 	var name string
@@ -862,6 +1089,53 @@ func (d *DB) CreateCollection(ctx context.Context, name string) (int64, error) {
 	return id, err
 }
 
+// CreateGallery creates a user gallery.
+func (d *DB) CreateGallery(ctx context.Context, name string) (int64, error) {
+	return d.CreateCollection(ctx, name)
+}
+
+// SaveSearch persists a search URL and derived title.
+func (d *DB) SaveSearch(ctx context.Context, searchURL, title string) (int64, error) {
+	searchURL = strings.TrimSpace(searchURL)
+	title = strings.TrimSpace(title)
+	if searchURL == "" || title == "" {
+		return 0, errors.New("search URL and title are required")
+	}
+	var id int64
+	err := d.sql.QueryRowContext(ctx,
+		`INSERT INTO saved_searches (url, title) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET title=excluded.title RETURNING id`,
+		searchURL, title).Scan(&id)
+	return id, err
+}
+
+// SavedSearches returns saved search criteria newest first.
+func (d *DB) SavedSearches(ctx context.Context) ([]SavedSearch, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT id, url, title FROM saved_searches ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	searches := make([]SavedSearch, 0)
+	for rows.Next() {
+		var search SavedSearch
+		if err := rows.Scan(&search.ID, &search.URL, &search.Title); err != nil {
+			return nil, err
+		}
+		searches = append(searches, search)
+	}
+	return searches, rows.Err()
+}
+
+// DeleteSavedSearch removes a saved search by ID.
+func (d *DB) DeleteSavedSearch(ctx context.Context, id int64) error {
+	if id < 1 {
+		return errors.New("invalid saved search ID")
+	}
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM saved_searches WHERE id = ?`, id)
+	return err
+}
+
 // PhotosForCollection returns photos in a collection.
 func (d *DB) PhotosForCollection(ctx context.Context, collectionID int64) ([]Photo, error) {
 	photos, err := d.queryPhotos(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors FROM photos p
@@ -870,6 +1144,143 @@ func (d *DB) PhotosForCollection(ctx context.Context, collectionID int64) ([]Pho
 		slog.Error("Error querying photos for collection: ", "err", err)
 	}
 	return photos, err
+}
+
+// PhotosForGallery loads photos from a user gallery.
+func (d *DB) PhotosForGallery(ctx context.Context, galleryID int64) ([]Photo, error) {
+	return d.PhotosForCollection(ctx, galleryID)
+}
+
+// SimilarPhotos returns up to limit photos ranked by overlap with a target photo.
+// Detected tags/objects are weighted 10 times more heavily than dominant colours.
+func (d *DB) SimilarPhotos(ctx context.Context, targetID int64, limit int) ([]Photo, error) {
+	if targetID < 1 {
+		return nil, sql.ErrNoRows
+	}
+	if limit < 1 {
+		return nil, nil
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return d.queryPhotos(ctx, `
+		WITH target AS (
+			SELECT id, objects, dominant_colors FROM photos WHERE id = ?
+		),
+		ranked AS (
+			SELECT p.id,
+				COALESCE((
+					SELECT COUNT(*)
+					FROM json_each(p.objects) candidate_tag
+					JOIN json_each(target.objects) target_tag
+						ON candidate_tag.value = target_tag.value
+				), 0) AS tag_matches,
+				COALESCE((
+					SELECT COUNT(*)
+					FROM json_each(p.dominant_colors) candidate_color
+					JOIN json_each(target.dominant_colors) target_color
+						ON candidate_color.value = target_color.value
+				), 0) AS color_matches
+			FROM photos p CROSS JOIN target
+			WHERE p.id != target.id
+		)
+		SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude,
+			COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired,
+			p.objects, p.dominant_colors
+		FROM ranked JOIN photos p ON p.id = ranked.id
+		ORDER BY (ranked.tag_matches * 10 + ranked.color_matches) DESC,
+			p.taken_at ASC, p.id ASC
+		LIMIT ?`,
+		targetID, limit)
+}
+
+// NearPhotos returns up to 100 geotagged photos within 50 km of the target,
+// ordered by Euclidean EPSG:900913 distance.
+func (d *DB) NearPhotos(ctx context.Context, targetID int64, limit int) ([]Photo, error) {
+	if targetID < 1 {
+		return nil, sql.ErrNoRows
+	}
+	if limit < 1 {
+		return nil, nil
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return d.queryPhotos(ctx, `
+		WITH target AS (
+			SELECT x, y FROM photos WHERE id = ? AND x IS NOT NULL AND y IS NOT NULL
+		),
+		ranked AS (
+			SELECT p.id,
+				SQRT((p.x - target.x) * (p.x - target.x) +
+					(p.y - target.y) * (p.y - target.y)) AS distance_metres
+			FROM photos p CROSS JOIN target
+			WHERE p.id != ? AND p.x IS NOT NULL AND p.y IS NOT NULL
+				AND SQRT((p.x - target.x) * (p.x - target.x) +
+					(p.y - target.y) * (p.y - target.y)) <= 50000
+		)
+		SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude,
+			COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired,
+			p.objects, p.dominant_colors
+		FROM ranked JOIN photos p ON p.id = ranked.id
+		ORDER BY ranked.distance_metres ASC, p.taken_at ASC, p.id ASC
+		LIMIT ?`,
+		targetID, targetID, limit)
+}
+
+// RandomPhotoID returns the ID of one randomly selected photo.
+func (d *DB) RandomPhotoID(ctx context.Context) (int64, error) {
+	var id int64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT id FROM photos ORDER BY RANDOM() LIMIT 1`).Scan(&id)
+	return id, err
+}
+
+// RandomCollectionPhotos returns the target plus up to two distinct random neighbors.
+func (d *DB) RandomCollectionPhotos(ctx context.Context, targetID int64) ([]Photo, error) {
+	if targetID < 1 {
+		return nil, sql.ErrNoRows
+	}
+	target, err := d.PhotoByID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT id FROM photos WHERE id != ? ORDER BY RANDOM() LIMIT 2`, targetID)
+	if err != nil {
+		return nil, err
+	}
+	var neighborIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		neighborIDs = append(neighborIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	neighbors, err := d.PhotosByIDs(ctx, neighborIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(neighbors) == 0 {
+		return []Photo{target}, nil
+	}
+
+	collection := make([]Photo, 0, 3)
+	if len(neighbors) > 0 {
+		collection = append(collection, neighbors[0])
+	}
+	collection = append(collection, target)
+	if len(neighbors) > 1 {
+		collection = append(collection, neighbors[1])
+	}
+	return collection, nil
 }
 
 // AddPhotosToCollection adds existing photos to a collection and returns how many were newly added.
@@ -886,6 +1297,11 @@ func (d *DB) AddPhotosToCollection(ctx context.Context, collectionID int64, phot
 	return result.RowsAffected()
 }
 
+// AddPhotosToGallery adds photos to a user gallery.
+func (d *DB) AddPhotosToGallery(ctx context.Context, galleryID int64, photoIDs []int64) (int64, error) {
+	return d.AddPhotosToCollection(ctx, galleryID, photoIDs)
+}
+
 // RemovePhotosFromCollection removes photos from a collection.
 func (d *DB) RemovePhotosFromCollection(ctx context.Context, collectionID int64, photoIDs []int64) error {
 	if len(photoIDs) == 0 {
@@ -895,6 +1311,11 @@ func (d *DB) RemovePhotosFromCollection(ctx context.Context, collectionID int64,
 	_, err := d.sql.ExecContext(ctx, `DELETE FROM collection_photos WHERE collection_id = ?
 		AND photo_id IN (`+placeholders+`)`, append([]any{collectionID}, args...)...)
 	return err
+}
+
+// RemovePhotosFromGallery removes photos from a user gallery.
+func (d *DB) RemovePhotosFromGallery(ctx context.Context, galleryID int64, photoIDs []int64) error {
+	return d.RemovePhotosFromCollection(ctx, galleryID, photoIDs)
 }
 
 // DeleteCollection deletes a collection and its photo memberships.

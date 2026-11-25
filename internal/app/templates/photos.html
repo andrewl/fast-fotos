@@ -1,0 +1,26 @@
+{{define "photos"}}{{template "photos-content" .}}{{end}}
+{{define "photos-content"}}
+<div class="gallery-head">
+  <h1>{{if .Collection}}{{.Collection.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Photos{{end}}</h1>
+  {{if eq .Page "search"}}
+  <span class="search-result-count">Matched {{len .Photos}} photos</span>{{end}}
+    <div class="header-actions">
+      {{if .Collection}}<button type="button" id="flickr-open" class="btn btn-light p-1" command="show-modal" commandfor="flickr-dialog" title="Upload to Flickr">Upload to Flickr</button>{{end}}
+      <details class="action-menu">
+        <summary aria-label="Open selected menu"><span aria-hidden="true" class="material-symbols-outlined">check_box</span><span class="sr-only">Selected</span></summary>
+        <div class="action-menu-panel">
+          <button onClick="selectAll()" id="select-all">Select all on page</button>
+          <button onClick="selectNone()" id="unselect-all">Unselect all on page</button>
+          <button onClick="clearSelection()" id="clear-selection-all">Clear all selected</button>
+          <button type="button" id="add-selection-to-gallery" class="btn btn-light p-1" command="show-modal" commandfor="add-to-gallery-dialog">Add Selected To Gallery</button>
+          <button type="button" data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" id="download-with-raw" disabled>Download selected with raw files</button>
+          <button type="button" data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" id="download-without-raw" disabled>Download selected without raw files</button>
+        </div>
+      </details>
+    </div>
+</div>
+<div class="grid">
+  {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}"{{if index $.Selected .ID}} checked{{end}} aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
+{{else}}<p>No photos found</p>{{end}}
+</div>
+{{end}}

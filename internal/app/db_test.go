@@ -2,10 +2,160 @@ package app
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestPlaceBounds(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	lat1, lng1 := 34.145, -118.16
+	lat2, lng2 := 34.15, -118.15
+	for _, record := range []PhotoRecord{
+		{Path: "pasadena-a.jpg", TakenAt: base, Latitude: &lat1, Longitude: &lng1, Settlement: "Pasadena", MediaType: "photo", IndexedAt: base},
+		{Path: "pasadena-b.jpg", TakenAt: base.Add(time.Hour), Latitude: &lat2, Longitude: &lng2, Settlement: "Pasadena", MediaType: "photo", IndexedAt: base},
+	} {
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	kind, bounds, err := db.PlaceBounds(ctx, "Pasadena")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != "settlement" {
+		t.Fatalf("place kind = %q, want settlement", kind)
+	}
+	if bounds.MinLatitude != lat1 || bounds.MaxLatitude != lat2 ||
+		bounds.MinLongitude != lng1 || bounds.MaxLongitude != lng2 {
+		t.Fatalf("place bounds = %+v", bounds)
+	}
+}
+
+func TestSavedSearchCRUD(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	id, err := db.SaveSearch(ctx, "/search/color=red", "color red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	searches, err := db.SavedSearches(ctx)
+	if err != nil || len(searches) != 1 {
+		t.Fatalf("saved searches = %+v, %v", searches, err)
+	}
+	if searches[0].ID != id || searches[0].URL != "/search/color=red" || searches[0].Title != "color red" {
+		t.Fatalf("saved search = %+v", searches[0])
+	}
+	if err := db.DeleteSavedSearch(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	searches, err = db.SavedSearches(ctx)
+	if err != nil || len(searches) != 0 {
+		t.Fatalf("saved searches after delete = %+v, %v", searches, err)
+	}
+}
+
+func TestRandomCollectionPhotos(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 5; i++ {
+		record := PhotoRecord{
+			Path:      "photo-" + string(rune('0'+i)) + ".jpg",
+			TakenAt:   base.Add(time.Duration(i) * time.Hour),
+			MediaType: "photo",
+			IndexedAt: base,
+		}
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	photos, err := db.RandomCollectionPhotos(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(photos) != 3 {
+		t.Fatalf("random collection has %d photos, want 3", len(photos))
+	}
+	if photos[1].ID != 3 {
+		t.Fatalf("middle random photo = %d, want target 3", photos[1].ID)
+	}
+	seen := map[int64]bool{}
+	for _, photo := range photos {
+		if seen[photo.ID] {
+			t.Fatalf("random collection contains duplicate photo %d", photo.ID)
+		}
+		seen[photo.ID] = true
+	}
+
+	randomID, err := db.RandomPhotoID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if randomID < 1 || randomID > 5 {
+		t.Fatalf("random photo id = %d", randomID)
+	}
+}
+
+func TestSimilarPhotosWeightsTagsTenTimesColors(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	records := []PhotoRecord{
+		{Path: "target.jpg", TakenAt: base, Objects: []string{"cat", "forest"}, DominantColors: []string{"green"}, MediaType: "photo"},
+		{Path: "tag-match.jpg", TakenAt: base.Add(time.Hour), Objects: []string{"cat"}, DominantColors: []string{"blue"}, MediaType: "photo"},
+		{Path: "color-match.jpg", TakenAt: base.Add(2 * time.Hour), Objects: []string{"dog"}, DominantColors: []string{"green"}, MediaType: "photo"},
+		{Path: "no-match.jpg", TakenAt: base.Add(3 * time.Hour), Objects: []string{"car"}, DominantColors: []string{"red"}, MediaType: "photo"},
+	}
+	for i, record := range records {
+		record.IndexedAt = base
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SetDetectedObjects(ctx, int64(i+1), record.Objects); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	photos, err := db.SimilarPhotos(ctx, 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(photos) != 3 {
+		t.Fatalf("similar photos = %d, want 3", len(photos))
+	}
+	if photos[0].Path != "tag-match.jpg" {
+		t.Fatalf("top match = %q, want tag-match.jpg", photos[0].Path)
+	}
+	if photos[1].Path != "color-match.jpg" {
+		t.Fatalf("second match = %q, want color-match.jpg", photos[1].Path)
+	}
+}
 
 func TestDBRoundTrip(t *testing.T) {
 	ctx := context.Background()
@@ -164,5 +314,63 @@ func TestSelectedCollection(t *testing.T) {
 	}
 	if ids, _ := db.SelectedPhotoIDs(ctx); len(ids) != 0 {
 		t.Fatalf("not cleared: %v", ids)
+	}
+}
+func TestNearPhotosUsesMercatorDistance(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := OpenDB(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	targetLat, targetLng := 51.5, -0.12
+	nearLat, nearLng := 51.6, -0.12
+	farLat, farLng := 52.0, -0.12
+	for i, record := range []PhotoRecord{
+		{Path: "target.jpg", TakenAt: base, Latitude: &targetLat, Longitude: &targetLng, MediaType: "photo"},
+		{Path: "near.jpg", TakenAt: base.Add(time.Hour), Latitude: &nearLat, Longitude: &nearLng, MediaType: "photo"},
+		{Path: "far.jpg", TakenAt: base.Add(2 * time.Hour), Latitude: &farLat, Longitude: &farLng, MediaType: "photo"},
+	} {
+		record.IndexedAt = base
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			continue
+		}
+	}
+
+	photos, err := db.NearPhotos(ctx, 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(photos) != 1 || photos[0].Path != "near.jpg" {
+		t.Fatalf("near photos = %+v, want only near.jpg", photos)
+	}
+
+	var x, y float64
+	if err := db.sql.QueryRowContext(ctx, `SELECT x, y FROM photos WHERE id = 1`).Scan(&x, &y); err != nil {
+		t.Fatal(err)
+	}
+	wantX, wantY := EPSG900913Project(targetLat, targetLng)
+	if math.Abs(x-wantX) > 0.001 || math.Abs(y-wantY) > 0.001 {
+		t.Fatalf("mercator coordinates = (%f, %f), want (%f, %f)", x, y, wantX, wantY)
+	}
+	if _, err := db.sql.ExecContext(ctx, `UPDATE photos SET x = NULL, y = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Existing records are backfilled on the next open.
+	db, err = OpenDB(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	photos, err = db.NearPhotos(ctx, 1, 100)
+	if err != nil || len(photos) != 1 {
+		t.Fatalf("near photos after reopen = %d, %v", len(photos), err)
 	}
 }

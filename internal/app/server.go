@@ -118,12 +118,15 @@ type Month struct {
 	Count int
 }
 
-// Collection represents a custom photo collection.
-type Collection struct {
+// Gallery represents a user-created gallery.
+type Gallery struct {
 	ID    int64
 	Name  string
 	Count int
 }
+
+// Collection is kept for source compatibility; new code should use Gallery.
+type Collection = Gallery
 
 // PageData contains all contextual view data passed to HTML templates for rendering.
 type PageData struct {
@@ -132,6 +135,7 @@ type PageData struct {
 	Photo              *Photo
 	Months             []Month
 	Collections        []Collection
+	Galleries          []Gallery
 	SelectedMonth      string
 	Collection         *Collection
 	PhotoRoot          string
@@ -140,8 +144,13 @@ type PageData struct {
 	SelectedSettlement string
 	SelectedRegion     string
 	MapBounds          *MapBounds
+	MapPhotoID         int64
+	MapURL             string
+	MapPhotoIDs        []int64
+	MapPhotoIDsCSV     string
 	MapReturnURL       string
 	Search             SearchData
+	SavedSearches      []SavedSearch
 	ReturnURL          string
 	CollectionName     string
 	PreviousPhotoID    int64
@@ -280,23 +289,32 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(mustSub(staticFiles, "static"))))
 	mux.HandleFunc("GET /", s.home)
 	mux.HandleFunc("GET /timeline/", s.timeline)
-	mux.HandleFunc("GET /image/", s.image)
 	mux.HandleFunc("GET /search", s.search)
 	mux.HandleFunc("GET /search/", s.search)
 	mux.HandleFunc("GET /maintenance", s.maintenance)
 	mux.HandleFunc("GET /months/", s.month)
 	mux.HandleFunc("GET /this-week/", s.thisweek)
+	mux.HandleFunc("GET /this-week", s.thisweek)
 	mux.HandleFunc("GET /locations", s.locations)
+	mux.HandleFunc("GET /locations/", s.locations)
 	mux.HandleFunc("GET /cluster", s.cluster)
 	mux.HandleFunc("GET /api/map-points", s.mapPoints)
 	mux.HandleFunc("GET /api/map-cluster", s.mapCluster)
-	mux.HandleFunc("GET /collection/", s.collectionPage)
-	mux.HandleFunc("POST /collection", s.addToCollection)
-	mux.HandleFunc("DELETE /collection/", s.removeFromCollection)
-	mux.HandleFunc("DELETE /collections/", s.deleteCollection)
+	mux.HandleFunc("GET /gallery/", s.galleryPage)
+	mux.HandleFunc("GET /galleries", s.galleryPage)
+	mux.HandleFunc("GET /galleries/", s.galleryPage)
+	mux.HandleFunc("POST /gallery", s.addToGallery)
+	mux.HandleFunc("DELETE /gallery/", s.removeFromGallery)
+	mux.HandleFunc("DELETE /galleries/", s.deleteGallery)
 	mux.HandleFunc("POST /selection", s.selectPhotos)
 	mux.HandleFunc("DELETE /selection", s.unselectPhotos)
 	mux.HandleFunc("POST /selection/clear", s.clearSelection)
+	mux.HandleFunc("POST /saved-searches", s.saveSearch)
+	mux.HandleFunc("DELETE /saved-searches/", s.deleteSavedSearch)
+	mux.HandleFunc("GET /similar/", s.similarCollection)
+	mux.HandleFunc("GET /near-to/", s.nearCollection)
+	mux.HandleFunc("GET /random", s.randomCollection)
+	mux.HandleFunc("GET /random/", s.randomCollection)
 	mux.HandleFunc("POST /index", s.index)
 	mux.HandleFunc("POST /reindex", s.reindex)
 	mux.HandleFunc("POST /stop-indexing", s.stopIndexing)
@@ -338,12 +356,17 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.render(w, "home", PageData{Months: months, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
+	s.render(w, "home", PageData{Page: "home", Months: months, Photos: photos, SelectedMonth: selectedMonth, PhotoRoot: s.config.PhotoRoot, ReturnURL: "/"})
 }
 
 // timeline renders the photo gallery for a specific month (e.g. /timeline/2026-08).
 func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
-	month := strings.TrimPrefix(r.URL.Path, "/timeline/")
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	month := strings.TrimPrefix(collectionPath, "/timeline/")
 	if len(month) == 7 && month[4] == '/' {
 		month = month[:4] + "-" + month[5:]
 	}
@@ -363,73 +386,189 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
+	months, err = s.db.Months(r.Context())
+	if err != nil {
+		slog.Error("Failed to load months", "error", err)
+		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
+		return
+	}
+	if mapView {
+		if hasPhoto {
+			if !photoInCollection(photos, photoID) {
+				http.NotFound(w, r)
+				return
+			}
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, collectionPath, photos)
+		return
+	}
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, collectionPath, monthLabel(month), photos)
+		return
+	}
 	s.render(w, "home", PageData{Page: "home", Months: months, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
 }
 
-// image renders the detail page for a single photo including EXIF metadata and navigation links.
-func (s *Server) image(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/image/"), 10, 64)
-	if err != nil || id < 1 {
-		slog.Error("Invalid photo ID", "id", r.URL.Path, "error", err)
-		http.NotFound(w, r)
-		return
-	}
-	photo, err := s.db.PhotoByID(r.Context(), id)
+func parseSearchCollectionCriteria(criteria string) (url.Values, error) {
+	decoded, err := url.PathUnescape(criteria)
 	if err != nil {
-		slog.Error("Failed to load photo", "id", id, "error", err)
-		http.NotFound(w, r)
-		return
+		return nil, err
 	}
-	from := r.URL.Query().Get("from")
-	if from == "" {
-		from = timelinePath(photo.TakenAt.Format("2006-01"))
-	}
-	returnURL, collectionName, collection, err := s.imageGalleryContextPhotos(r.Context(), from, s.selectionToken(w, r))
-	if err != nil {
-		slog.Error("Failed to load image collection", "from", from, "error", err)
-		http.NotFound(w, r)
-		return
-	}
-	previousID, nextID := adjacentPhotoIDs(collection, id)
-	galleries, err := s.db.Collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load galleries", "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
-		return
-	}
-	photoCollections, err := s.db.CollectionIDsForPhoto(r.Context(), id)
-	if err != nil {
-		slog.Error("Failed to load photo collections", "id", id, "error", err)
-		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
-		return
-	}
-	var otherCollections []Collection
-	for _, gallery := range galleries {
-		if gallery.Name != SelectedCollectionName {
-			otherCollections = append(otherCollections, gallery)
+	query := url.Values{}
+	if strings.Contains(decoded, ",") && !strings.Contains(decoded, "&") {
+		for _, part := range strings.Split(decoded, ",") {
+			key, value, found := strings.Cut(part, "=")
+			if !found {
+				return nil, errors.New("invalid search criteria")
+			}
+			query.Set(key, value)
+		}
+	} else {
+		query, err = url.ParseQuery(decoded)
+		if err != nil {
+			return nil, err
 		}
 	}
-	s.render(w, "image", PageData{Page: "image", Photo: &photo, Collections: galleries, OtherCollections: otherCollections, PhotoCollections: photoCollections, ReturnURL: returnURL, CollectionName: collectionName, PreviousPhotoID: previousID, NextPhotoID: nextID})
+	for _, key := range []string{"from", "to"} {
+		value := query.Get(key)
+		if len(value) == 8 {
+			query.Set(key, value[:4]+"-"+value[4:6]+"-"+value[6:])
+		}
+	}
+	return query, nil
+}
+
+func parseLocationsCollectionCriteria(criteria string) (url.Values, error) {
+	decoded, err := url.PathUnescape(criteria)
+	if err != nil {
+		return nil, err
+	}
+	query := url.Values{}
+	if strings.Contains(decoded, ",") && !strings.Contains(decoded, "&") {
+		for _, part := range strings.Split(decoded, ",") {
+			key, value, found := strings.Cut(part, "=")
+			if !found {
+				return nil, errors.New("invalid locations criteria")
+			}
+			query.Set(key, value)
+		}
+	} else {
+		query, err = url.ParseQuery(decoded)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return query, nil
+}
+
+func canonicalLocationsURL(query url.Values) string {
+	keys := []string{"place", "settlement", "region", "minLat", "minLng", "maxLat", "maxLng", "mapLat", "mapLng", "mapZoom", "photoId", "photoIds"}
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(query.Get(key))
+		if value != "" {
+			parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
+	}
+	if len(parts) == 0 {
+		return "/locations"
+	}
+	return "/locations/" + strings.Join(parts, ",")
+}
+
+func canonicalSearchURL(query url.Values) string {
+	keys := []string{"from", "to", "label", "color", "camera", "focal", "flash", "location"}
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(query.Get(key))
+		if value != "" {
+			parts = append(parts, url.QueryEscape(key)+"="+url.QueryEscape(value))
+		}
+	}
+	if len(parts) == 0 {
+		return "/search"
+	}
+	return "/search/" + strings.Join(parts, ",")
+}
+
+// searchTitle derives a concise human-readable title from canonical search criteria.
+func searchTitle(query url.Values) string {
+	labels := make([]string, 0, 8)
+	if value := strings.TrimSpace(query.Get("from")); value != "" {
+		labels = append(labels, "from "+value)
+	}
+	if value := strings.TrimSpace(query.Get("to")); value != "" {
+		labels = append(labels, "to "+value)
+	}
+	if value := strings.TrimSpace(query.Get("label")); value != "" {
+		labels = append(labels, "label "+value)
+	}
+	if value := strings.TrimSpace(query.Get("color")); value != "" {
+		labels = append(labels, "color "+value)
+	}
+	if value := strings.TrimSpace(query.Get("camera")); value != "" {
+		labels = append(labels, "camera "+value)
+	}
+	if value := strings.TrimSpace(query.Get("focal")); value != "" {
+		labels = append(labels, "focal "+value+" mm")
+	}
+	if value := strings.TrimSpace(query.Get("flash")); value != "" {
+		if value == "yes" {
+			labels = append(labels, "flash fired")
+		} else {
+			labels = append(labels, "flash not fired")
+		}
+	}
+	if value := strings.TrimSpace(query.Get("location")); value != "" {
+		value = strings.TrimPrefix(value, "settlement:")
+		value = strings.TrimPrefix(value, "region:")
+		labels = append(labels, "location "+value)
+	}
+	if len(labels) == 0 {
+		return "All photos"
+	}
+	return strings.Join(labels, ", ")
 }
 
 // search renders the photo search form and filtered search result thumbnail grid.
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
+	var collectionPath string
+	var photoID int64
+	var hasPhoto bool
+	var mapView bool
+	if r.URL.Path == "/search" && len(query) > 0 {
+		http.Redirect(w, r, canonicalSearchURL(query), http.StatusSeeOther)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/search/") {
-		criteria := strings.TrimPrefix(r.URL.Path, "/search/")
-		decoded, err := url.PathUnescape(criteria)
-		if err != nil {
-			slog.Error("Failed to decode search criteria", "criteria", criteria, "error", err)
+		var ok bool
+		collectionPath, photoID, hasPhoto, mapView, ok = splitCollectionPhotoMapPath(r.URL.Path)
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-
-		query, err = url.ParseQuery(decoded)
+		criteria := strings.TrimPrefix(collectionPath, "/search/")
+		parsedQuery, err := parseSearchCollectionCriteria(criteria)
 		if err != nil {
-			slog.Error("Failed to parse search criteria", "criteria", decoded, "error", err)
+			slog.Error("Failed to parse search criteria", "criteria", criteria, "error", err)
 			http.NotFound(w, r)
 			return
 		}
+		for _, key := range []string{"from", "to", "label", "color", "camera", "focal", "flash", "location"} {
+			if parsedQuery.Get(key) == "" && r.URL.Query().Get(key) != "" {
+				parsedQuery.Set(key, r.URL.Query().Get(key))
+			}
+		}
+		query = parsedQuery
 	}
 	search := SearchData{
 		DateFrom: query.Get("from"), DateTo: query.Get("to"), Label: query.Get("label"),
@@ -469,6 +608,20 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	collectionQuery := url.Values{}
+	for key, value := range map[string]string{
+		"from": search.DateFrom, "to": search.DateTo, "label": search.Label,
+		"color": search.Color, "camera": search.CameraModel, "focal": search.FocalLength,
+		"flash": search.Flash, "location": search.Location,
+	} {
+		if value != "" {
+			collectionQuery.Set(key, value)
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/search") {
+		collectionPath = canonicalSearchURL(collectionQuery)
+	}
+
 	photos := []Photo{}
 	//we must have at lease one search criteria to avoid returning the entire photo library
 	if search.DateFrom == "" && search.DateTo == "" && search.Label == "" && search.CameraModel == "" && search.FocalLength == "" && search.Flash == "" && search.Location == "" && search.Color == "" {
@@ -481,6 +634,24 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Could not search photos", http.StatusInternalServerError)
 			return
 		}
+	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, collectionPath, photos)
+		return
+	}
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, collectionPath, "Search results", photos)
+		return
 	}
 	var err error
 	if search.CameraModels, err = s.db.CameraModels(r.Context()); err != nil {
@@ -515,7 +686,19 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "search", PageData{Page: "search", Photos: photos, Collections: galleries, Search: search, ReturnURL: r.URL.RequestURI()})
+	if collectionPath == "" {
+		collectionPath = "/search"
+	}
+	savedSearches, err := s.db.SavedSearches(r.Context())
+	if err != nil {
+		slog.Error("Failed to load saved searches", "error", err)
+		http.Error(w, "Could not load saved searches", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "search", PageData{
+		Page: "search", Photos: photos, Collections: galleries, Search: search,
+		SavedSearches: savedSearches, ReturnURL: collectionPath,
+	})
 }
 
 // selectionToken reads or sets an HTTP-only session cookie for managing photo selections.
@@ -546,6 +729,12 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		slog.Error("Invalid collection URL", "url", from, "error", err)
 		return "", "", nil, errors.New("invalid collection URL")
 	}
+	if strings.Contains(galleryURL.Path, "/photo/") {
+		collectionPath, _, _, validCollectionPath := splitCollectionPhotoPath(galleryURL.Path)
+		if validCollectionPath {
+			galleryURL.Path = collectionPath
+		}
+	}
 	switch {
 	case galleryURL.Path == "/":
 		slog.Info("Loading timeline", "query", galleryURL.Query())
@@ -570,9 +759,10 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		slog.Info("Loading map cluster", "query", galleryURL.Query())
 		photos, err := s.clusterPhotos(ctx, galleryURL.Query())
 		return galleryURL.RequestURI(), "Map cluster", photos, err
-	case strings.HasPrefix(galleryURL.Path, "/collections/"):
+	case strings.HasPrefix(galleryURL.Path, "/galleries/"):
 		slog.Info("Loading collection", "collectionId", galleryURL.Path)
-		collectionID, err := strconv.ParseInt(strings.TrimPrefix(galleryURL.Path, "/collections/"), 10, 64)
+		galleryPath := strings.TrimPrefix(galleryURL.Path, "/galleries/")
+		collectionID, err := strconv.ParseInt(galleryPath, 10, 64)
 		if err != nil || collectionID < 1 {
 			slog.Error("Invalid collection ID", "collectionId", galleryURL.Path, "error", err)
 			return "", "", nil, errors.New("invalid collection")
@@ -583,7 +773,7 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 			slog.Error("Failed to load collection name", "collectionId", collectionID, "error", err)
 		}
 		return galleryURL.Path, name, photos, err
-	case galleryURL.Path == "/this-week/":
+	case galleryURL.Path == "/this-week" || galleryURL.Path == "/this-week/":
 		photos, err := s.photosForThisWeek(ctx)
 		return galleryURL.Path, "This Week", photos, err
 	case galleryURL.Path == "/search" || strings.HasPrefix(galleryURL.Path, "/search/"):
@@ -591,11 +781,8 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		query := galleryURL.Query()
 		if strings.HasPrefix(galleryURL.Path, "/search/") {
 			criteria := strings.TrimPrefix(galleryURL.Path, "/search/")
-			decoded, err := url.PathUnescape(criteria)
-			if err != nil {
-				return "", "", nil, err
-			}
-			query, err = url.ParseQuery(decoded)
+			var err error
+			query, err = parseSearchCollectionCriteria(criteria)
 			if err != nil {
 				return "", "", nil, err
 			}
@@ -603,7 +790,7 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		search := SearchData{
 			DateFrom: query.Get("from"), DateTo: query.Get("to"), Label: query.Get("label"),
 			CameraModel: query.Get("camera"), FocalLength: query.Get("focal"), Flash: query.Get("flash"),
-			Location: query.Get("location"),
+			Location: query.Get("location"), Color: query.Get("color"),
 		}
 		if strings.HasPrefix(search.Location, "settlement:") {
 			search.Settlement = strings.TrimPrefix(search.Location, "settlement:")
@@ -618,6 +805,154 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		slog.Error("Unsupported collection URL", "url", galleryURL.Path)
 		return "", "", nil, errors.New("unsupported collection URL")
 	}
+}
+
+// splitCollectionPhotoPath separates a collection URL from an optional trailing /photo/<id>.
+func splitCollectionPhotoPath(path string) (collectionPath string, photoID int64, hasPhoto bool, ok bool) {
+	const marker = "/photo/"
+	markerIndex := strings.LastIndex(path, marker)
+	if markerIndex < 0 {
+		return strings.TrimSuffix(path, "/"), 0, false, path != ""
+	}
+	collectionPath = strings.TrimSuffix(path[:markerIndex], "/")
+	idText := path[markerIndex+len(marker):]
+	if collectionPath == "" || idText == "" || strings.Contains(idText, "/") {
+		return "", 0, false, false
+	}
+	id, err := strconv.ParseInt(idText, 10, 64)
+	if err != nil || id < 1 {
+		return "", 0, false, false
+	}
+	return collectionPath, id, true, true
+}
+
+// splitCollectionPhotoMapPath handles the optional /map suffix on collection and photo URLs.
+func splitCollectionPhotoMapPath(path string) (collectionPath string, photoID int64, hasPhoto, mapView, ok bool) {
+	mapView = strings.HasSuffix(strings.TrimSuffix(path, "/"), "/map")
+	if mapView {
+		path = strings.TrimSuffix(strings.TrimSuffix(path, "/"), "/map")
+	}
+	collectionPath, photoID, hasPhoto, ok = splitCollectionPhotoPath(path)
+	if ok {
+		return collectionPath, photoID, hasPhoto, mapView, true
+	}
+	if mapView {
+		collectionPath = strings.TrimSuffix(path, "/")
+		if collectionPath != "" {
+			return collectionPath, 0, false, true, true
+		}
+	}
+	return "", 0, false, false, false
+}
+
+func mapURLForPhoto(photo Photo) string {
+	if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
+		return ""
+	}
+	return fmt.Sprintf("/photo/%d/map", photo.ID)
+}
+
+func mapURLForCollectionPhoto(returnURL string, photo Photo) string {
+	if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
+		return ""
+	}
+	if parsed, err := url.Parse(returnURL); err == nil {
+		returnURL = parsed.Path
+	}
+	if collectionPath, _, hasPhoto, _, valid := splitCollectionPhotoMapPath(returnURL); valid && !hasPhoto {
+		return strings.TrimSuffix(collectionPath, "/") + fmt.Sprintf("/photo/%d/map", photo.ID)
+	}
+	return mapURLForPhoto(photo)
+}
+
+func photoInCollection(photos []Photo, id int64) bool {
+	for _, photo := range photos {
+		if photo.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// renderCollectionMap renders a map limited to geotagged photos in a collection.
+func (s *Server) renderCollectionMap(w http.ResponseWriter, r *http.Request, returnURL string, photos []Photo) {
+	ids := make([]int64, 0, len(photos))
+	var minLat, minLng, maxLat, maxLng *float64
+	for _, photo := range photos {
+		if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
+			continue
+		}
+		ids = append(ids, photo.ID)
+		lat, lng := *photo.Latitude, *photo.Longitude
+		if minLat == nil || lat < *minLat {
+			minLat = &lat
+		}
+		if maxLat == nil || lat > *maxLat {
+			maxLat = &lat
+		}
+		if minLng == nil || lng < *minLng {
+			minLng = &lng
+		}
+		if maxLng == nil || lng > *maxLng {
+			maxLng = &lng
+		}
+	}
+	if len(ids) == 0 {
+		http.Error(w, "Collection has no geotagged photos", http.StatusNotFound)
+		return
+	}
+	bounds := &MapBounds{
+		MinLatitude: *minLat, MinLongitude: *minLng,
+		MaxLatitude: *maxLat, MaxLongitude: *maxLng,
+	}
+	locationGroups, _ := s.db.LocationGroups(r.Context())
+	idText := make([]string, len(ids))
+	for i, id := range ids {
+		idText[i] = strconv.FormatInt(id, 10)
+	}
+	s.render(w, "locations", PageData{
+		Page: "locations", Locations: locationGroups, MapBounds: bounds,
+		MapPhotoIDs: ids, MapPhotoIDsCSV: strings.Join(idText, ","),
+		MapReturnURL: returnURL,
+	})
+}
+
+// renderCollectionPhoto verifies membership before displaying a photo and derives navigation from the collection.
+func (s *Server) renderCollectionPhoto(w http.ResponseWriter, r *http.Request, id int64, returnURL, collectionName string, photos []Photo) {
+	if !photoInCollection(photos, id) {
+		http.NotFound(w, r)
+		return
+	}
+	photo, err := s.db.PhotoByID(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	previousID, nextID := adjacentPhotoIDs(photos, id)
+	galleries, err := s.db.Collections(r.Context())
+	if err != nil {
+		slog.Error("Failed to load galleries", "error", err)
+		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		return
+	}
+	photoCollections, err := s.db.CollectionIDsForPhoto(r.Context(), id)
+	if err != nil {
+		slog.Error("Failed to load photo collections", "id", id, "error", err)
+		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		return
+	}
+	var otherCollections []Collection
+	for _, gallery := range galleries {
+		if gallery.Name != SelectedCollectionName {
+			otherCollections = append(otherCollections, gallery)
+		}
+	}
+	s.render(w, "image", PageData{
+		Page: "image", Photo: &photo, Collections: galleries, OtherCollections: otherCollections,
+		PhotoCollections: photoCollections, ReturnURL: returnURL, CollectionName: collectionName,
+		PreviousPhotoID: previousID, NextPhotoID: nextID,
+		MapURL: mapURLForCollectionPhoto(returnURL, photo),
+	})
 }
 
 // adjacentPhotoIDs returns the IDs of the photos directly preceding and following currentID in a slice.
@@ -663,7 +998,13 @@ func (s *Server) month(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "gallery", PageData{Photos: photos, SelectedMonth: month})
+	months, err := s.db.Months(r.Context())
+	if err != nil {
+		slog.Error("Failed to load months", "error", err)
+		http.Error(w, "Could not load photo library", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "home", PageData{Page: "home", Photos: photos, SelectedMonth: month, Months: months, ReturnURL: r.URL.Path})
 }
 
 // thiswweek renders the photo grid HTML template partial for this week
@@ -674,7 +1015,30 @@ func (s *Server) thisweek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load photos", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "thisweek", PageData{Photos: photos, ReturnURL: r.URL.Path})
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok || (collectionPath != "/this-week" && collectionPath != "/this-week/") {
+		http.NotFound(w, r)
+		return
+	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, "/this-week", photos)
+		return
+	}
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, "/this-week", "This Week", photos)
+		return
+	}
+	s.render(w, "thisweek", PageData{Page: "thisweek", Photos: photos, ReturnURL: r.URL.Path})
 }
 
 // locations renders the interactive Leaflet map and location selection sidebar.
@@ -686,10 +1050,89 @@ func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	selectedSettlement := r.URL.Query().Get("settlement")
-	selectedRegion := r.URL.Query().Get("region")
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	mapPhotoID := int64(0)
 	var bounds *MapBounds
-	if selectedSettlement != "" || selectedRegion != "" {
+	criteria := r.URL.Query()
+	if strings.HasPrefix(collectionPath, "/locations/") {
+		encoded := strings.TrimPrefix(collectionPath, "/locations/")
+		criteria, err = parseLocationsCollectionCriteria(encoded)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
+	selectedSettlement := criteria.Get("settlement")
+	selectedRegion := criteria.Get("region")
+	if mapPhotoID == 0 {
+		minLat, hasMinLat := parseOptionalFloat(criteria.Get("minLat"))
+		minLng, hasMinLng := parseOptionalFloat(criteria.Get("minLng"))
+		maxLat, hasMaxLat := parseOptionalFloat(criteria.Get("maxLat"))
+		maxLng, hasMaxLng := parseOptionalFloat(criteria.Get("maxLng"))
+		if hasMinLat && hasMinLng && hasMaxLat && hasMaxLng &&
+			minLat >= -90 && maxLat <= 90 && minLng >= -180 && maxLng <= 180 && minLat <= maxLat && minLng <= maxLng {
+			bounds = &MapBounds{MinLatitude: minLat, MinLongitude: minLng, MaxLatitude: maxLat, MaxLongitude: maxLng}
+		} else if criteria.Get("minLat") != "" || criteria.Get("minLng") != "" || criteria.Get("maxLat") != "" || criteria.Get("maxLng") != "" {
+			http.Error(w, "Invalid map bounds", http.StatusBadRequest)
+			return
+		}
+	}
+	if place := criteria.Get("place"); place != "" {
+		kind, placeBounds, err := s.db.PlaceBounds(r.Context(), place)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.NotFound(w, r)
+				return
+			}
+			slog.Error("Failed to load place bounds", "place", place, "error", err)
+			http.Error(w, "Could not load place bounds", http.StatusInternalServerError)
+			return
+		}
+		if kind == "settlement" {
+			selectedSettlement = place
+		} else {
+			selectedRegion = place
+		}
+		resolvedMinLat, hasResolvedMinLat := parseOptionalFloat(criteria.Get("minLat"))
+		resolvedMinLng, hasResolvedMinLng := parseOptionalFloat(criteria.Get("minLng"))
+		resolvedMaxLat, hasResolvedMaxLat := parseOptionalFloat(criteria.Get("maxLat"))
+		resolvedMaxLng, hasResolvedMaxLng := parseOptionalFloat(criteria.Get("maxLng"))
+		if hasResolvedMinLat && hasResolvedMinLng && hasResolvedMaxLat && hasResolvedMaxLng {
+			bounds = &MapBounds{
+				MinLatitude: resolvedMinLat, MinLongitude: resolvedMinLng,
+				MaxLatitude: resolvedMaxLat, MaxLongitude: resolvedMaxLng,
+			}
+		} else {
+			redirectQuery := url.Values{
+				"minLat": {fmt.Sprintf("%.6f", placeBounds.MinLatitude)},
+				"minLng": {fmt.Sprintf("%.6f", placeBounds.MinLongitude)},
+				"maxLat": {fmt.Sprintf("%.6f", placeBounds.MaxLatitude)},
+				"maxLng": {fmt.Sprintf("%.6f", placeBounds.MaxLongitude)},
+			}
+			http.Redirect(w, r, canonicalLocationsURL(redirectQuery), http.StatusSeeOther)
+			return
+		}
+	}
+	if mapPhotoID == 0 {
+		minLat, hasMinLat := parseOptionalFloat(criteria.Get("minLat"))
+		minLng, hasMinLng := parseOptionalFloat(criteria.Get("minLng"))
+		maxLat, hasMaxLat := parseOptionalFloat(criteria.Get("maxLat"))
+		maxLng, hasMaxLng := parseOptionalFloat(criteria.Get("maxLng"))
+		if hasMinLat && hasMinLng && hasMaxLat && hasMaxLng &&
+			minLat >= -90 && maxLat <= 90 && minLng >= -180 && maxLng <= 180 && minLat <= maxLat && minLng <= maxLng {
+			bounds = &MapBounds{MinLatitude: minLat, MinLongitude: minLng, MaxLatitude: maxLat, MaxLongitude: maxLng}
+		} else if criteria.Get("minLat") != "" || criteria.Get("minLng") != "" || criteria.Get("maxLat") != "" || criteria.Get("maxLng") != "" {
+			http.Error(w, "Invalid map bounds", http.StatusBadRequest)
+			return
+		}
+	}
+	if mapPhotoID == 0 && bounds == nil && (selectedSettlement != "" || selectedRegion != "") {
 		bounds, err = s.db.LocationBounds(r.Context(), selectedSettlement, selectedRegion)
 		if err != nil {
 			slog.Error("Failed to load location bounds", "settlement", selectedSettlement, "region", selectedRegion, "error", err)
@@ -697,9 +1140,48 @@ func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if hasPhoto {
+		if bounds == nil {
+			http.NotFound(w, r)
+			return
+		}
+		photos, err := s.db.PhotosInBounds(r.Context(),
+			bounds.MinLatitude, bounds.MaxLatitude, bounds.MinLongitude, bounds.MaxLongitude)
+		if err != nil {
+			http.Error(w, "Could not load location collection", http.StatusInternalServerError)
+			return
+		}
+		if !photoInCollection(photos, photoID) {
+			http.NotFound(w, r)
+			return
+		}
+		if mapView {
+			mapPhotoID = photoID
+			photo, err := s.db.PhotoByID(r.Context(), photoID)
+			if err != nil || photo.Latitude == nil || photo.Longitude == nil ||
+				(*photo.Latitude == 0 && *photo.Longitude == 0) {
+				http.NotFound(w, r)
+				return
+			}
+			const padding = 0.001
+			bounds = &MapBounds{
+				MinLatitude:  *photo.Latitude - padding,
+				MaxLatitude:  *photo.Latitude + padding,
+				MinLongitude: *photo.Longitude - padding,
+				MaxLongitude: *photo.Longitude + padding,
+			}
+			s.render(w, "locations", PageData{
+				Page: "locations", Locations: locationGroups, MapBounds: bounds,
+				MapPhotoID: mapPhotoID, MapReturnURL: collectionPath,
+			})
+			return
+		}
+		s.renderCollectionPhoto(w, r, photoID, collectionPath, "Locations", photos)
+		return
+	}
 	s.render(w, "locations", PageData{Page: "locations", Locations: locationGroups,
 		SelectedLocation: selectedSettlement + selectedRegion, SelectedSettlement: selectedSettlement,
-		SelectedRegion: selectedRegion, MapBounds: bounds, MapReturnURL: r.URL.RequestURI()})
+		SelectedRegion: selectedRegion, MapBounds: bounds, MapPhotoID: mapPhotoID, MapReturnURL: r.URL.RequestURI()})
 }
 
 // cluster renders the grid view for photos contained within a specific map cluster bounding box.
@@ -720,6 +1202,42 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request) {
 // mapPoints responds with JSON spatial cluster points aggregated by map grid cells for the current zoom level.
 func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
+	if photoIDsText := query.Get("photoIds"); photoIDsText != "" {
+		photoIDs, err := parseIDList(photoIDsText)
+		if err != nil {
+			http.Error(w, "Invalid photo IDs", http.StatusBadRequest)
+			return
+		}
+		points, err := s.db.MapPointsForPhotos(r.Context(), photoIDs)
+		if err != nil {
+			http.Error(w, "Could not load map locations", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(points); err != nil {
+			http.Error(w, "Could not encode map locations", http.StatusInternalServerError)
+		}
+		return
+	}
+	if photoIDText := query.Get("photoId"); photoIDText != "" {
+		photoID, err := strconv.ParseInt(photoIDText, 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid photo ID", http.StatusBadRequest)
+			return
+		}
+		if photoID > 0 {
+			points, err := s.db.MapPointForPhoto(r.Context(), photoID)
+			if err != nil {
+				http.Error(w, "Could not load map location", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(points); err != nil {
+				http.Error(w, "Could not encode map location", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil {
 		slog.Error("Invalid minimum latitude", "error", err)
@@ -774,6 +1292,42 @@ func (s *Server) mapPoints(w http.ResponseWriter, r *http.Request) {
 // mapCluster responds with JSON metadata for all photos located within specified cluster map bounds.
 func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
+	if photoIDsText := query.Get("photoIds"); photoIDsText != "" {
+		photoIDs, err := parseIDList(photoIDsText)
+		if err != nil {
+			http.Error(w, "Invalid photo IDs", http.StatusBadRequest)
+			return
+		}
+		photos, err := s.db.ClusterPointsForPhotos(r.Context(), photoIDs)
+		if err != nil {
+			http.Error(w, "Could not load map photos", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(photos); err != nil {
+			http.Error(w, "Could not encode map photos", http.StatusInternalServerError)
+		}
+		return
+	}
+	if photoIDText := query.Get("photoId"); photoIDText != "" {
+		photoID, err := strconv.ParseInt(photoIDText, 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid photo ID", http.StatusBadRequest)
+			return
+		}
+		if photoID > 0 {
+			photos, err := s.db.ClusterPointForPhoto(r.Context(), photoID)
+			if err != nil {
+				http.Error(w, "Could not load map photo", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(photos); err != nil {
+				http.Error(w, "Could not encode map photo", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil || minLatitude < -90 || minLatitude > 90 {
 		slog.Error("Invalid cluster minimum latitude", "error", err)
@@ -815,6 +1369,20 @@ func (s *Server) mapCluster(w http.ResponseWriter, r *http.Request) {
 
 // clusterPhotos queries full Photo records lying within specified map cluster bounding box coordinates.
 func (s *Server) clusterPhotos(ctx context.Context, query url.Values) ([]Photo, error) {
+	if photoIDText := query.Get("photoId"); photoIDText != "" {
+		photoID, err := strconv.ParseInt(photoIDText, 10, 64)
+		if err != nil || photoID < 1 {
+			return nil, errors.New("invalid photo ID")
+		}
+		photo, err := s.db.PhotoByID(ctx, photoID)
+		if err != nil {
+			return nil, err
+		}
+		if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
+			return nil, sql.ErrNoRows
+		}
+		return []Photo{photo}, nil
+	}
 	minLatitude, maxLatitude, minLongitude, maxLongitude, err := clusterBounds(query)
 	if err != nil {
 		return nil, err
@@ -823,6 +1391,14 @@ func (s *Server) clusterPhotos(ctx context.Context, query url.Values) ([]Photo, 
 }
 
 // clusterBounds parses bounding box coordinate query parameters minLat, maxLat, minLng, maxLng.
+func parseOptionalFloat(value string) (float64, bool) {
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	return parsed, err == nil
+}
+
 func clusterBounds(query url.Values) (float64, float64, float64, float64, error) {
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil || minLatitude < -90 || minLatitude > 90 {
@@ -843,29 +1419,9 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 	return minLatitude, maxLatitude, minLongitude, maxLongitude, nil
 }
 
-/*
-// galleriesPage renders the custom galleries list page or redirects to the first gallery.
-func (s *Server) allCollectionsPage(w http.ResponseWriter, r *http.Request) {
+// galleryPage renders a user-created gallery and optional photo detail.
+func (s *Server) galleryPage(w http.ResponseWriter, r *http.Request) {
 	collections, err := s.db.Collections(r.Context())
-	if err != nil {
-		slog.Error("Failed to load collections", "error", err)
-		http.Error(w, "Could not load collections", http.StatusInternalServerError)
-		return
-	}
-	if len(collections) > 0 {
-		slog.Info("Redirecting to first collection", "collectionID", collections[0].ID)
-		http.Redirect(w, r, fmt.Sprintf("/collection/%d", collections[0].ID), http.StatusSeeOther)
-		return
-	}
-	s.render(w, "collections", PageData{Collections: collections})
-}
-*/
-
-// gallery renders the detail grid page for a collection
-func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
-	//if we have no collections yet just render the page - the template will take care of it
-	collections, err := s.db.Collections(r.Context())
-
 	if err != nil {
 		slog.Error("Failed to load collections", "error", err)
 		http.Error(w, "Could not load collections", http.StatusInternalServerError)
@@ -877,11 +1433,27 @@ func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/collection/"), 10, 64)
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if collectionPath == "/galleries" || collectionPath == "/galleries/" {
+		s.render(w, "collection", PageData{
+			Page: "galleries", Collections: collections, Collection: nil,
+			Photos: nil, ReturnURL: r.URL.Path,
+		})
+		return
+	}
+	prefix := "/galleries/"
+	if strings.HasPrefix(collectionPath, "/gallery/") {
+		prefix = "/gallery/"
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(collectionPath, prefix), 10, 64)
 	if err != nil || id < 1 {
 		slog.Error("Invalid collection ID", "error", err)
 		slog.Info("Redirecting to first collection", "collectionID", collections[0].ID)
-		http.Redirect(w, r, fmt.Sprintf("/collection/%d", collections[0].ID), http.StatusSeeOther)
+		http.Redirect(w, r, fmt.Sprintf("/galleries/%d", collections[0].ID), http.StatusSeeOther)
 		return
 	}
 	collection, err := s.db.CollectionByID(r.Context(), id)
@@ -896,18 +1468,179 @@ func (s *Server) collectionPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load collection", http.StatusInternalServerError)
 		return
 	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, fmt.Sprintf("/galleries/%d", id), photos)
+		return
+	}
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, fmt.Sprintf("/galleries/%d", id), collection.Name, photos)
+		return
+	}
 	s.render(w, "collection", PageData{Collections: collections, Collection: &collection, Photos: photos, ReturnURL: r.URL.Path})
 }
 
-// addToCollection adds selected photo IDs to an existing or newly created custom gallery.
+// similarCollection renders a conceptual collection of photos similar to a target photo.
+func (s *Server) similarCollection(w http.ResponseWriter, r *http.Request) {
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	targetText := strings.TrimPrefix(collectionPath, "/similar/")
+	targetID, err := strconv.ParseInt(targetText, 10, 64)
+	if err != nil || targetID < 1 {
+		http.Error(w, "Invalid photo ID", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.PhotoByID(r.Context(), targetID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	photos, err := s.db.SimilarPhotos(r.Context(), targetID, 100)
+	if err != nil {
+		slog.Error("Failed to load similar photos", "photo_id", targetID, "error", err)
+		http.Error(w, "Could not load similar photos", http.StatusInternalServerError)
+		return
+	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, fmt.Sprintf("/similar/%d", targetID), photos)
+		return
+	}
+	collectionURL := fmt.Sprintf("/similar/%d", targetID)
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, collectionURL, "Similar to", photos)
+		return
+	}
+	s.render(w, "gallery-full", PageData{Page: "gallery", Photos: photos, ReturnURL: collectionURL, CollectionName: "Similar to"})
+}
+
+// randomCollection redirects to a random photo or renders that photo within a three-photo random collection.
+func (s *Server) randomCollection(w http.ResponseWriter, r *http.Request) {
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if collectionPath == "/random" || collectionPath == "/random/" {
+		if hasPhoto {
+			if _, err := s.db.PhotoByID(r.Context(), photoID); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			targetID := photoID
+			photos, err := s.db.RandomCollectionPhotos(r.Context(), targetID)
+			if err != nil {
+				slog.Error("Failed to load random collection", "photo_id", targetID, "error", err)
+				http.Error(w, "Could not load random collection", http.StatusInternalServerError)
+				return
+			}
+			if mapView {
+				s.renderCollectionMap(w, r, fmt.Sprintf("/random/%d", targetID), photos)
+				return
+			}
+			s.renderCollectionPhoto(w, r, targetID, "/random/"+strconv.FormatInt(targetID, 10),
+				"Random", photos)
+			return
+		}
+		targetID, err := s.db.RandomPhotoID(r.Context())
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.NotFound(w, r)
+				return
+			}
+			slog.Error("Failed to choose random photo", "error", err)
+			http.Error(w, "Could not choose a random photo", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, fmt.Sprintf("/random/photo/%d", targetID), http.StatusSeeOther)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// nearCollection renders a conceptual collection of photos within 50 km of a target photo.
+func (s *Server) nearCollection(w http.ResponseWriter, r *http.Request) {
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	targetText := strings.TrimPrefix(collectionPath, "/near-to/")
+	targetID, err := strconv.ParseInt(targetText, 10, 64)
+	if err != nil || targetID < 1 {
+		http.Error(w, "Invalid photo ID", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.PhotoByID(r.Context(), targetID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	photos, err := s.db.NearPhotos(r.Context(), targetID, 100)
+	if err != nil {
+		slog.Error("Failed to load nearby photos", "photo_id", targetID, "error", err)
+		http.Error(w, "Could not load nearby photos", http.StatusInternalServerError)
+		return
+	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, fmt.Sprintf("/near-to/%d", targetID), photos)
+		return
+	}
+	collectionURL := fmt.Sprintf("/near-to/%d", targetID)
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, collectionURL, "Near to", photos)
+		return
+	}
+	s.render(w, "gallery-full", PageData{Page: "gallery", Photos: photos, ReturnURL: collectionURL, CollectionName: "Near to"})
+}
+
+// addToCollection is retained as a compatibility wrapper for older callers.
 func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
+	s.addToGallery(w, r)
+}
+
+// addToGallery adds selected photo IDs to an existing or newly created custom gallery.
+func (s *Server) addToGallery(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
 		slog.Error("No photo IDs provided for gallery addition")
 		http.Error(w, "Select at least one photo", http.StatusBadRequest)
 		return
 	}
-	galleryID, err := s.selectCollection(r.Context(), r.FormValue("collection_id"), r.FormValue("name"))
+	galleryIDInput := r.FormValue("gallery_id")
+	if galleryIDInput == "" {
+		galleryIDInput = r.FormValue("collection_id")
+	}
+	galleryID, err := s.selectCollection(r.Context(), galleryIDInput, r.FormValue("name"))
 	if err != nil {
 		slog.Error("Failed to select or create gallery", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -930,18 +1663,26 @@ func (s *Server) addToCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.Header().Set("HX-Redirect", fmt.Sprintf("/galleries/%d", galleryID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) removeFromCollection(w http.ResponseWriter, r *http.Request) {
+	s.removeFromGallery(w, r)
+}
+
+func (s *Server) removeFromGallery(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
 		slog.Error("No photo IDs provided for gallery deletion")
 		http.Error(w, "Select at least one photo to remove from a gallery", http.StatusBadRequest)
 		return
 	}
-	galleryID, err := s.selectCollection(r.Context(), r.FormValue("collection_id"), "")
+	galleryIDInput := r.FormValue("gallery_id")
+	if galleryIDInput == "" {
+		galleryIDInput = r.FormValue("collection_id")
+	}
+	galleryID, err := s.selectCollection(r.Context(), galleryIDInput, "")
 	if err != nil {
 		slog.Error("Failed to select gallery to delete item from", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -959,13 +1700,18 @@ func (s *Server) removeFromCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not remove photos from gallery", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/collections/%d", galleryID))
+	w.Header().Set("HX-Redirect", fmt.Sprintf("/galleries/%d", galleryID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // addToCollection adds selected photo IDs to an existing or newly created custom gallery.
 func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
-	collectionID := strings.TrimPrefix(r.URL.Path, "/collections/")
+	s.deleteGallery(w, r)
+}
+
+func (s *Server) deleteGallery(w http.ResponseWriter, r *http.Request) {
+	collectionID := strings.TrimPrefix(r.URL.Path, "/galleries/")
+	collectionID = strings.TrimPrefix(collectionID, "/")
 	galleryID, err := s.selectCollection(r.Context(), collectionID, "")
 	if err != nil {
 		slog.Error("Failed to select collection to remove", "error", err)
@@ -981,7 +1727,7 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to delete collection", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("HX-Redirect", "/collection")
+	w.Header().Set("HX-Redirect", "/galleries")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1017,6 +1763,58 @@ func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not clear selection", http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// saveSearch persists the criteria represented by a canonical search URL.
+func (s *Server) saveSearch(w http.ResponseWriter, r *http.Request) {
+	searchURL := strings.TrimSpace(r.FormValue("url"))
+	if !strings.HasPrefix(searchURL, "/search") {
+		http.Error(w, "Invalid search URL", http.StatusBadRequest)
+		return
+	}
+	parsed, err := url.Parse(searchURL)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" {
+		http.Error(w, "Invalid search URL", http.StatusBadRequest)
+		return
+	}
+
+	var title string
+	if strings.HasPrefix(parsed.Path, "/search/") {
+		criteria := strings.TrimPrefix(parsed.Path, "/search/")
+		query, err := parseSearchCollectionCriteria(criteria)
+		if err != nil {
+			http.Error(w, "Invalid search URL", http.StatusBadRequest)
+			return
+		}
+		title = searchTitle(query)
+	} else {
+		title = searchTitle(parsed.Query())
+	}
+
+	if _, err := s.db.SaveSearch(r.Context(), parsed.Path, title); err != nil {
+		slog.Error("Failed to save search", "url", parsed.Path, "error", err)
+		http.Error(w, "Could not save search", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Redirect", parsed.Path)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteSavedSearch removes saved search criteria by ID.
+func (s *Server) deleteSavedSearch(w http.ResponseWriter, r *http.Request) {
+	idText := strings.TrimPrefix(r.URL.Path, "/saved-searches/")
+	id, err := strconv.ParseInt(idText, 10, 64)
+	if err != nil || id < 1 {
+		http.Error(w, "Invalid saved search ID", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.DeleteSavedSearch(r.Context(), id); err != nil {
+		slog.Error("Failed to delete saved search", "id", id, "error", err)
+		http.Error(w, "Could not delete saved search", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("HX-Redirect", "/search")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1461,16 +2259,17 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"urlquery":         url.QueryEscape,
 	}
 	pages := map[string][]string{
-		"home":        {"templates/base.html", "templates/home.html", "templates/gallery.html"},
-		"image":       {"templates/base.html", "templates/image.html", "templates/gallery.html"},
-		"search":      {"templates/base.html", "templates/search.html", "templates/gallery.html"},
-		"maintenance": {"templates/base.html", "templates/maintenance.html"},
-		"gallery":     {"templates/gallery.html"},
-		"locations":   {"templates/base.html", "templates/locations.html"},
-		"cluster":     {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
-		"collections": {"templates/base.html", "templates/collections.html"},
-		"collection":  {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
-		"thisweek":    {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
+		"home":         {"templates/base.html", "templates/home.html", "templates/gallery.html"},
+		"image":        {"templates/base.html", "templates/image.html", "templates/gallery.html"},
+		"search":       {"templates/base.html", "templates/search.html", "templates/gallery.html"},
+		"maintenance":  {"templates/base.html", "templates/maintenance.html"},
+		"gallery":      {"templates/gallery.html"},
+		"collections":  {"templates/base.html", "templates/collections.html"},
+		"collection":   {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
+		"gallery-full": {"templates/base.html", "templates/gallery_full.html", "templates/gallery.html"},
+		"locations":    {"templates/base.html", "templates/locations.html"},
+		"cluster":      {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
+		"thisweek":     {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {
@@ -1501,9 +2300,17 @@ func timelinePath(month string) string {
 // imagePath constructs a URL path to a photo's detail page with an optional return context URL.
 func imagePath(id int64, returnURL string) string {
 	if returnURL == "" {
-		return "/image/" + strconv.FormatInt(id, 10)
+		return "/photo/" + strconv.FormatInt(id, 10)
 	}
-	return "/image/" + strconv.FormatInt(id, 10) + "?from=" + url.QueryEscape(returnURL)
+	if parsed, err := url.Parse(returnURL); err == nil {
+		returnURL = parsed.Path
+	} else if queryIndex := strings.Index(returnURL, "?"); queryIndex >= 0 {
+		returnURL = returnURL[:queryIndex]
+	}
+	if collectionPath, _, hasPhoto, valid := splitCollectionPhotoPath(returnURL); valid && hasPhoto {
+		returnURL = collectionPath
+	}
+	return strings.TrimSuffix(returnURL, "/") + "/photo/" + strconv.FormatInt(id, 10)
 }
 
 // monthLabel formats a YYYY-MM string into a human-readable month name and year (e.g. "August 2026").

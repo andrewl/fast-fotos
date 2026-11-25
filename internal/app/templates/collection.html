@@ -1,11 +1,11 @@
 {{define "collection"}}{{template "base" .}}{{end}}
 {{define "content"}}
 <aside>
-  <h2>Collections</h2>
+  <h2>Galleries</h2>
   {{range .Collections}}
-  {{if ne .Name "selected"}}<span class="material-symbols-outlined" aria-hidden="true" hx-delete="/collections/{{.ID}}">delete</span>{{end}}<a class="month{{if and $.Collection (eq .ID $.Collection.ID)}} active{{end}}"{{if and $.Collection (eq .ID $.Collection.ID)}} aria-current="page"{{end}} href="/collection/{{.ID}}">{{.Name}} <span>{{.Count}}</span></a>
+  {{if ne .Name "selected"}}<span class="material-symbols-outlined" aria-hidden="true" hx-delete="/galleries/{{.ID}}">delete</span>{{end}}<a class="month{{if and $.Collection (eq .ID $.Collection.ID)}} active{{end}}"{{if and $.Collection (eq .ID $.Collection.ID)}} aria-current="page"{{end}} href="/galleries/{{.ID}}">{{.Name}} <span>{{.Count}}</span></a>
   {{else}}
-  <p>No collections yet.</p>
+  <p>No galleries yet.</p>
   {{end}}
 </aside>
 <section id="gallery">{{template "gallery-content" .}}</section>

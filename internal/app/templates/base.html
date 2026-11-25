@@ -19,29 +19,29 @@
       <a href="/this-week" title="This week"><span aria-hidden="true" class="material-symbols-outlined">today</span><span class="sr-only">This week</span></a>
       <a href="/search" title="Search"><span aria-hidden="true" class="material-symbols-outlined">search</span><span class="sr-only">Search</span></a>
       <a href="/locations" title="Map"><span aria-hidden="true" class="material-symbols-outlined">map</span><span class="sr-only">Map</span></a>
-      <a href="/collection" title="Collections"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Collections</span></a>
+      <a href="/galleries" title="Galleries"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Galleries</span></a>
       <a href="/maintenance" title="Maintenance"><span aria-hidden="true" class="material-symbols-outlined">build</span><span class="sr-only">Maintenance</span></a>
     </nav>
     <button type="button" id="sidebar-toggle" class="sidebar-toggle" aria-controls="sidebar" aria-expanded="false">Menu</button>
   </header>
   <main>{{template "content" .}}</main>
-  <dialog id="add-to-collection-dialog">
-    <form id="add-to-collection-form" data-append-photo-ids hx-post="/collection" hx-swap="none">
+  <dialog id="add-to-gallery-dialog">
+    <form id="add-to-gallery-form" data-append-photo-ids hx-post="/gallery" hx-swap="none">
       <input name="ids" type="hidden">
-      <h2>Add selected to Collection</h2>
+      <h2>Add selected to gallery</h2>
       <div>
-      <label>Existing Collection
-        <select name="collection_id">
-          <option value="">Create a new Collection</option>
+      <label>Existing gallery
+        <select name="gallery_id">
+          <option value="">Create a new gallery</option>
           {{range .Collections}}<option value="{{.ID}}">{{.Name}} ({{.Count}})</option>{{end}}
         </select>
       </label>
       </div>
       <div>  
-      <label>New Collection name <input name="name" maxlength="200"></label>
+      <label>New gallery name <input name="name" maxlength="200"></label>
       </div>
-      <p id="add-to-collection-error" role="alert" hidden></p>
-      <div class="dialog-actions"><button data-close-collection-dialog type="submit">Add to Collection</button><button type="button" data-close-collection-dialog>Cancel</button></div>
+      <p id="add-to-gallery-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button data-close-gallery-dialog type="submit">Add to gallery</button><button type="button" data-close-gallery-dialog>Cancel</button></div>
     </form>
   </dialog>
   <section id="photo-viewer" class="photo-viewer" hidden aria-label="Photo viewer">

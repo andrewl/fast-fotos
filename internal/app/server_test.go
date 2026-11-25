@@ -7,14 +7,113 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
 // TestParseTemplates tests parsing all embedded template files.
+func TestSidebarAndSearchPageRendering(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if err := db.UpsertPhoto(ctx, PhotoRecord{Path: "a.jpg", TakenAt: base, MediaType: "photo", IndexedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateGallery(ctx, "Test gallery"); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{name: "timeline", path: "/timeline/2026/11", want: []string{"<aside>", ">Timeline<", "/timeline/"}},
+		{name: "search", path: "/search", want: []string{"<aside", "Saved searches", "data-search-form", "name=\"from\""}},
+		{name: "galleries", path: "/galleries", want: []string{"<aside>", ">Galleries<"}},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(http.MethodGet, test.path, nil)
+		response := httptest.NewRecorder()
+		switch test.name {
+		case "timeline":
+			server.timeline(response, request)
+		case "search":
+			server.search(response, request)
+		case "galleries":
+			server.galleryPage(response, request)
+		}
+		body := response.Body.String()
+		t.Logf("%s response status=%d body=%s", test.name, response.Code, body)
+		for _, expected := range test.want {
+			if !bytes.Contains(response.Body.Bytes(), []byte(expected)) {
+				t.Errorf("%s response missing %q", test.name, expected)
+			}
+		}
+		if body == "" {
+			t.Errorf("%s returned empty response", test.name)
+		}
+	}
+}
+
+func TestMapPointsForPhotoIDs(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	lat1, lng1 := 51.5, -0.12
+	lat2, lng2 := 48.8, 2.35
+	for _, record := range []PhotoRecord{
+		{Path: "a.jpg", TakenAt: base, Latitude: &lat1, Longitude: &lng1, MediaType: "photo", IndexedAt: base},
+		{Path: "b.jpg", TakenAt: base.Add(time.Hour), Latitude: &lat2, Longitude: &lng2, MediaType: "photo", IndexedAt: base},
+	} {
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server := &Server{db: db}
+	request := httptest.NewRequest(http.MethodGet, "/api/map-points?photoIds=1&minLat=-90&maxLat=90&minLng=-180&maxLng=180&zoom=10", nil)
+	response := httptest.NewRecorder()
+	server.mapPoints(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("map points status = %d", response.Code)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"photoId":1`)) {
+		t.Fatalf("map points response = %s", response.Body.String())
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(`"photoId":2`)) {
+		t.Fatalf("map points included photo outside collection: %s", response.Body.String())
+	}
+
+	zeroRequest := httptest.NewRequest(http.MethodGet,
+		"/api/map-points?photoId=0&minLat=-90&maxLat=90&minLng=-180&maxLng=180&zoom=10", nil)
+	zeroResponse := httptest.NewRecorder()
+	server.mapPoints(zeroResponse, zeroRequest)
+	if zeroResponse.Code != http.StatusOK {
+		t.Fatalf("photoId=0 map points status = %d, want 200", zeroResponse.Code)
+	}
+}
+
 func TestParseTemplates(t *testing.T) {
 	templates, err := parseTemplates()
 	if err != nil {
@@ -89,6 +188,280 @@ func TestSelectWeeklyPhotosIsDeterministic(t *testing.T) {
 		if selected[i].ID != reversed[i].ID {
 			t.Fatalf("selection changed with input order: %v != %v", selected, reversed)
 		}
+	}
+}
+
+func TestCollectionPhotoMapURLPreservesCollection(t *testing.T) {
+	lat, lng := 34.146019, -118.159211
+	photo := Photo{ID: 19, Latitude: &lat, Longitude: &lng}
+	if got := mapURLForCollectionPhoto("/timeline/2026/06", photo); got != "/timeline/2026/06/photo/19/map" {
+		t.Fatalf("timeline map URL = %q", got)
+	}
+	if got := mapURLForCollectionPhoto("/galleries/6", photo); got != "/galleries/6/photo/19/map" {
+		t.Fatalf("gallery map URL = %q", got)
+	}
+	if got := mapURLForCollectionPhoto("/locations/minLat=34.1,minLng=-118.2,maxLat=34.2,maxLng=-118.1", photo); got != "/locations/minLat=34.1,minLng=-118.2,maxLat=34.2,maxLng=-118.1/photo/19/map" {
+		t.Fatalf("locations map URL = %q", got)
+	}
+}
+
+func TestLocationsPhotoSuffix(t *testing.T) {
+	path := "/locations/minLat=34.145970,minLng=-118.159326,maxLat=34.146068,maxLng=-118.159096/photo/1"
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(path)
+	if !ok || collectionPath != "/locations/minLat=34.145970,minLng=-118.159326,maxLat=34.146068,maxLng=-118.159096" ||
+		photoID != 1 || !hasPhoto || mapView {
+		t.Fatalf("locations photo suffix parsed as (%q, %d, %t, %t, %t)",
+			collectionPath, photoID, hasPhoto, mapView, ok)
+	}
+
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	lat, lng := 34.146019, -118.159211
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if err := db.UpsertPhoto(ctx, PhotoRecord{
+		Path: "photo-18.jpg", TakenAt: base, Latitude: &lat, Longitude: &lng,
+		MediaType: "photo", IndexedAt: base,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	response := httptest.NewRecorder()
+	server.locations(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("locations photo status = %d, want 200", response.Code)
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte("photo-18.jpg")) {
+		t.Fatalf("locations photo response did not display photo 1")
+	}
+
+	mapRequest := httptest.NewRequest(http.MethodGet, path+"/map", nil)
+	mapResponse := httptest.NewRecorder()
+	server.locations(mapResponse, mapRequest)
+	if mapResponse.Code != http.StatusOK {
+		t.Fatalf("locations photo map status = %d, want 200", mapResponse.Code)
+	}
+	if !bytes.Contains(mapResponse.Body.Bytes(), []byte(`data-photo-id="1"`)) {
+		t.Fatalf("locations photo map did not limit map to photo 1")
+	}
+}
+
+func TestLocationsPlaceRedirect(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	lat1, lng1 := 34.145, -118.16
+	lat2, lng2 := 34.15, -118.15
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	for i, record := range []PhotoRecord{
+		{Path: "pasadena-a.jpg", TakenAt: base, Latitude: &lat1, Longitude: &lng1, Settlement: "Pasadena", MediaType: "photo", IndexedAt: base},
+		{Path: "pasadena-b.jpg", TakenAt: base.Add(time.Hour), Latitude: &lat2, Longitude: &lng2, Settlement: "Pasadena", MediaType: "photo", IndexedAt: base},
+	} {
+		record.IndexedAt = base
+		if err := db.UpsertPhoto(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			continue
+		}
+	}
+
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/locations/place=Pasadena", nil)
+	response := httptest.NewRecorder()
+	server.locations(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("place status = %d, want 303", response.Code)
+	}
+	location := response.Header().Get("Location")
+	if !strings.HasPrefix(location, "/locations/minLat=") ||
+		!strings.Contains(location, "minLat=") ||
+		!strings.Contains(location, "maxLng=") ||
+		strings.Contains(location, "place=") ||
+		strings.Contains(location, "mapLat=") ||
+		strings.Contains(location, "mapLng=") ||
+		strings.Contains(location, "mapZoom=") {
+		t.Fatalf("place redirect = %q", location)
+	}
+
+	resolvedRequest := httptest.NewRequest(http.MethodGet,
+		"/locations/place=Pasadena,minLat=34.145,minLng=-118.16,maxLat=34.15,maxLng=-118.15,mapZoom=22", nil)
+	resolvedResponse := httptest.NewRecorder()
+	server.locations(resolvedResponse, resolvedRequest)
+	if resolvedResponse.Code != http.StatusOK {
+		t.Fatalf("resolved place status = %d, want 200", resolvedResponse.Code)
+	}
+}
+
+func TestImagePathDoesNotAppendRepeatedPhotoSegments(t *testing.T) {
+	returnURL := "/search/from=2012-10-01?from=2012-10-01&to="
+	if got := imagePath(18, returnURL); got != "/search/from=2012-10-01/photo/18" {
+		t.Fatalf("imagePath() = %q", got)
+	}
+	if got := imagePath(18, "/search/from=2012-10-01/photo/18"); got != "/search/from=2012-10-01/photo/18" {
+		t.Fatalf("imagePath() repeated detail = %q", got)
+	}
+}
+
+func TestSearchTitle(t *testing.T) {
+	query := url.Values{
+		"from":     {"2026-10-10"},
+		"color":    {"red"},
+		"camera":   {"DSC-RX100M2"},
+		"location": {"region:Ain"},
+	}
+	title := searchTitle(query)
+	if title != "from 2026-10-10, color red, camera DSC-RX100M2, location Ain" {
+		t.Fatalf("searchTitle() = %q", title)
+	}
+}
+
+func TestLocationsCollectionURL(t *testing.T) {
+	query, err := parseLocationsCollectionCriteria("place=Pasadena,minLat=34.1,minLng=-118.2,maxLat=34.2,maxLng=-118.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("place") != "Pasadena" || query.Get("minLat") != "34.1" ||
+		query.Get("maxLng") != "-118.1" {
+		t.Fatalf("locations criteria = %v", query)
+	}
+
+	canonical := canonicalLocationsURL(url.Values{
+		"place":  {"Pasadena"},
+		"minLat": {"34.1"},
+		"minLng": {"-118.2"},
+		"maxLat": {"34.2"},
+		"maxLng": {"-118.1"},
+	})
+	if canonical != "/locations/place=Pasadena,minLat=34.1,minLng=-118.2,maxLat=34.2,maxLng=-118.1" {
+		t.Fatalf("canonical locations URL = %q", canonical)
+	}
+}
+
+func TestParseSearchCollectionCriteria(t *testing.T) {
+	query, err := parseSearchCollectionCriteria("from=20261010,to=20261109,color=red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("from") != "2026-10-10" || query.Get("to") != "2026-11-09" || query.Get("color") != "red" {
+		t.Fatalf("parsed search criteria = %v", query)
+	}
+
+	query, err = parseSearchCollectionCriteria("from%3D2026-10-10%26color%3Dred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("from") != "2026-10-10" || query.Get("color") != "red" {
+		t.Fatalf("parsed encoded search criteria = %v", query)
+	}
+
+	query, err = parseSearchCollectionCriteria("camera=DSC-RX100M2,location=region%3AAin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("camera") != "DSC-RX100M2" || query.Get("location") != "region:Ain" {
+		t.Fatalf("parsed region criteria = %v", query)
+	}
+}
+
+func TestRandomCollectionRedirect(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	if err := db.UpsertPhoto(ctx, PhotoRecord{Path: "random.jpg", TakenAt: base, MediaType: "photo", IndexedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{db: db}
+	request := httptest.NewRequest(http.MethodGet, "/random", nil)
+	response := httptest.NewRecorder()
+	server.randomCollection(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("random status = %d, want %d", response.Code, http.StatusSeeOther)
+	}
+	if location := response.Header().Get("Location"); location != "/random/photo/1" {
+		t.Fatalf("random location = %q, want /random/photo/1", location)
+	}
+}
+
+func TestSplitCollectionPhotoMapPath(t *testing.T) {
+	tests := []struct {
+		path       string
+		collection string
+		photoID    int64
+		hasPhoto   bool
+		mapView    bool
+		valid      bool
+	}{
+		{"/timeline/2026/11/map", "/timeline/2026/11", 0, false, true, true},
+		{"/timeline/2026/11/photo/143/map", "/timeline/2026/11", 143, true, true, true},
+		{"/timeline/2026/06/photo/19/map", "/timeline/2026/06", 19, true, true, true},
+		{"/galleries/6/map", "/galleries/6", 0, false, true, true},
+		{"/search/color=red/photo/18/map", "/search/color=red", 18, true, true, true},
+	}
+	for _, test := range tests {
+		collection, photoID, hasPhoto, mapView, valid := splitCollectionPhotoMapPath(test.path)
+		if collection != test.collection || photoID != test.photoID || hasPhoto != test.hasPhoto ||
+			mapView != test.mapView || valid != test.valid {
+			t.Errorf("splitCollectionPhotoMapPath(%q) = (%q, %d, %t, %t, %t), want (%q, %d, %t, %t, %t)",
+				test.path, collection, photoID, hasPhoto, mapView, valid,
+				test.collection, test.photoID, test.hasPhoto, test.mapView, test.valid)
+		}
+	}
+}
+
+func TestSplitCollectionPhotoPath(t *testing.T) {
+	tests := []struct {
+		path       string
+		collection string
+		photoID    int64
+		hasPhoto   bool
+		valid      bool
+	}{
+		{"/timeline/2026/11", "/timeline/2026/11", 0, false, true},
+		{"/timeline/2026/11/photo/143", "/timeline/2026/11", 143, true, true},
+		{"/this-week/photo/7", "/this-week", 7, true, true},
+		{"/galleries/6/photo/12", "/galleries/6", 12, true, true},
+		{"/galleries/6/photo/not-an-id", "", 0, false, false},
+	}
+	for _, test := range tests {
+		collection, photoID, hasPhoto, valid := splitCollectionPhotoPath(test.path)
+		if collection != test.collection || photoID != test.photoID || hasPhoto != test.hasPhoto || valid != test.valid {
+			t.Errorf("splitCollectionPhotoPath(%q) = (%q, %d, %t, %t), want (%q, %d, %t, %t)",
+				test.path, collection, photoID, hasPhoto, valid,
+				test.collection, test.photoID, test.hasPhoto, test.valid)
+		}
+	}
+}
+
+func TestPhotoInCollection(t *testing.T) {
+	photos := []Photo{{ID: 10}, {ID: 20}, {ID: 30}}
+	if !photoInCollection(photos, 20) {
+		t.Error("expected photo 20 to be in the collection")
+	}
+	if photoInCollection(photos, 21) {
+		t.Error("did not expect photo 21 to be in the collection")
 	}
 }
 
@@ -256,7 +629,7 @@ func TestDeleteCollectionKeepsSelected(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []int64{id, selectedID} {
-		request := httptest.NewRequest(http.MethodDelete, "/collections/"+strconv.FormatInt(target, 10), nil)
+		request := httptest.NewRequest(http.MethodDelete, "/galleries/"+strconv.FormatInt(target, 10), nil)
 		server.deleteCollection(httptest.NewRecorder(), request)
 	}
 	collections, err := db.Collections(ctx)

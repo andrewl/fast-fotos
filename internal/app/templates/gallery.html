@@ -1,7 +1,7 @@
 {{define "gallery"}}{{template "gallery-content" .}}{{end}}
 {{define "gallery-content"}}
 <div class="gallery-head">
-  <h1>{{if .Collection}}{{.Collection.Name}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Photos{{end}}</h1>
+  <h1>{{if .Collection}}{{.Collection.Name}}{{else if .CollectionName}}{{.CollectionName}}{{else if .SelectedMonth}}{{monthLabel .SelectedMonth}}{{else if eq .Page "search"}}Search results{{else if eq .Page "selected"}}Selected photos{{else if eq .Page "cluster"}}Map cluster{{else}}Photos{{end}}</h1>
   {{if eq .Page "search"}}
   <span class="search-result-count">Matched {{len .Photos}} photos</span>{{end}}
     <div class="header-actions">
@@ -11,7 +11,7 @@
           <button onClick="selectAll()" id="select-all">Select all on page</button>
           <button onClick="selectNone()" id="unselect-all">Unselect all on page</button>
           <button onClick="clearSelection()" id="clear-selection-all">Clear all selected</button>
-          <button type="button" id="add-selection-to-collection" class="btn btn-light p-1" command="show-modal" commandfor="add-to-collection-dialog">Add Selected To Collection</button>
+          <button type="button" id="add-selection-to-gallery" class="btn btn-light p-1" command="show-modal" commandfor="add-to-gallery-dialog">Add Selected To Gallery</button>
           <button type="button" data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" id="download-with-raw" disabled>Download selected with raw files</button>
           <button type="button" data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" id="download-without-raw" disabled>Download selected without raw files</button>
         </div>

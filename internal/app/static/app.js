@@ -29,7 +29,7 @@ function toggleOne(id) {
   updateActionMenu();
 }
 
-//persists selection changes to the server-side 'selected' collection
+//persists selection changes to the reserved selected gallery
 function persistSelection(ids, selected) {
   if (ids.length === 0) return;
   const body = new URLSearchParams({ ids: ids.join(",") });
@@ -87,14 +87,19 @@ document.addEventListener("click", (event) => {
     item.classList.remove("active");
     item.removeAttribute("aria-current");
   });
-
-  document.addEventListener("submit", (event) => {
-    if (!event.target.matches("[data-search-form]")) return;
-    const query = new URLSearchParams(new FormData(event.target)).toString();
-    event.target.action = query ? `/search/${encodeURIComponent(query)}` : "/search";
-  });
   month.classList.add("active");
   month.setAttribute("aria-current", "page");
+});
+
+document.addEventListener("submit", (event) => {
+  if (!event.target.matches("[data-search-form]")) return;
+  event.preventDefault();
+  const entries = [...new FormData(event.target).entries()]
+    .filter(([, value]) => value !== "")
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  const query = entries.join(",");
+  event.target.action = query ? `/search/${query}` : "/search";
+  window.location.assign(event.target.action);
 });
 
 document.addEventListener("click", (event) => {
@@ -103,8 +108,8 @@ document.addEventListener("click", (event) => {
   if (target.matches("#photo-viewer-back")) {
     closePhotoViewer();
   }
-  else if (target.matches("[data-close-collection-dialog]")) {
-    document.querySelector("#add-to-collection-dialog").close();
+  else if (target.matches("[data-close-gallery-dialog]")) {
+    document.querySelector("#add-to-gallery-dialog").close();
   }
 });
 
@@ -161,20 +166,20 @@ document.addEventListener("change", (event) => {
   if (event.target.matches("#photo-viewer-checkbox")) updatePreviewSelection();
 });
 
-//adds the photo on the current image page to a collection without leaving the page
-async function toggleCurrentPhotoInCollection(item) {
-  const photoId = document.querySelector("#image-collection-dialog").dataset.photoId;
-  const status = document.querySelector("#collection-status");
-  const remove = item.classList.contains("in-collection");
-  const params = new URLSearchParams({ ids: photoId, collection_id: item.dataset.collectionShortcut });
+// Adds or removes the current photo from a gallery without leaving the page.
+async function toggleCurrentPhotoInGallery(item) {
+  const photoId = document.querySelector("#image-gallery-dialog").dataset.photoId;
+  const status = document.querySelector("#gallery-status");
+  const remove = item.classList.contains("in-gallery");
+  const params = new URLSearchParams({ ids: photoId, gallery_id: item.dataset.galleryShortcut });
   const response = remove
-    ? await fetch(`/collection/0?${params}`, { method: "DELETE" })
-    : await fetch("/collection", { method: "POST", body: params });
+    ? await fetch(`/gallery/0?${params}`, { method: "DELETE" })
+    : await fetch("/gallery", { method: "POST", body: params });
   if (!response.ok) {
     status.textContent = (await response.text()).trim();
     return;
   }
-  item.classList.toggle("in-collection", !remove);
+  item.classList.toggle("in-gallery", !remove);
   status.textContent = `${remove ? "Removed from" : "Added to"} ${item.textContent}`;
 }
 
@@ -211,38 +216,38 @@ function toggleSidebar() {
   document.body.classList.toggle("sidebar-hidden");
 }
 
-async function addCurrentPhotoToCollection(fields) {
-  const photoId = document.querySelector("#image-collection-dialog").dataset.photoId;
+async function addCurrentPhotoToGallery(fields) {
+  const photoId = document.querySelector("#image-gallery-dialog").dataset.photoId;
   const body = new URLSearchParams({ ids: photoId, ...fields });
-  const status = document.querySelector("#collection-status");
-  const response = await fetch("/collection", { method: "POST", body });
+  const status = document.querySelector("#gallery-status");
+  const response = await fetch("/gallery", { method: "POST", body });
   const text = (await response.text()).trim();
   if (!response.ok) {
-    status.textContent = text.startsWith("No selected photos") ? "Already in that collection" : text;
+    status.textContent = text.startsWith("No selected photos") ? "Already in that gallery" : text;
     return false;
   }
-  status.textContent = "Added to collection";
+  status.textContent = "Added to gallery";
   return true;
 }
 
-function setupImageCollectionDialog() {
-  const dialog = document.querySelector("#image-collection-dialog");
+function setupImageGalleryDialog() {
+  const dialog = document.querySelector("#image-gallery-dialog");
   if (!dialog) return;
-  const select = dialog.querySelector("#image-collection-select");
-  const nameLabel = dialog.querySelector("#image-collection-name-label");
+  const select = dialog.querySelector("#image-gallery-select");
+  const nameLabel = dialog.querySelector("#image-gallery-name-label");
   const nameInput = nameLabel.querySelector("input");
-  const error = dialog.querySelector("#image-collection-error");
+  const error = dialog.querySelector("#image-gallery-error");
   const syncName = () => {
     nameLabel.hidden = select.value !== "";
   };
   select.addEventListener("change", syncName);
-  dialog.querySelector("#image-collection-cancel").addEventListener("click", () => dialog.close());
+  dialog.querySelector("#image-gallery-cancel").addEventListener("click", () => dialog.close());
   dialog.querySelector("form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const created = select.value === "";
-    const ok = await addCurrentPhotoToCollection({ collection_id: select.value, name: created ? nameInput.value : "" });
+    const ok = await addCurrentPhotoToGallery({ gallery_id: select.value, name: created ? nameInput.value : "" });
     if (!ok) {
-      error.textContent = document.querySelector("#collection-status").textContent;
+      error.textContent = document.querySelector("#gallery-status").textContent;
       error.hidden = false;
       return;
     }
@@ -256,24 +261,24 @@ function setupImageCollectionDialog() {
   dialog.syncName = syncName;
 }
 
-document.addEventListener("DOMContentLoaded", setupImageCollectionDialog);
+document.addEventListener("DOMContentLoaded", setupImageGalleryDialog);
 
 document.addEventListener("keydown", (event) => {
   if (!document.body.classList.contains("page-image")) return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.target.closest("dialog[open], textarea, select, input:not([type=checkbox])")) return;
   if (event.key === "c" || event.key === "C") {
-    const dialog = document.querySelector("#image-collection-dialog");
+    const dialog = document.querySelector("#image-gallery-dialog");
     event.preventDefault();
     dialog.syncName();
     dialog.showModal();
     return;
   }
   if (/^[1-9]$/.test(event.key)) {
-    const item = document.querySelectorAll("[data-collection-shortcut]")[Number(event.key) - 1];
+    const item = document.querySelectorAll("[data-gallery-shortcut]")[Number(event.key) - 1];
     if (item) {
       event.preventDefault();
-      toggleCurrentPhotoInCollection(item);
+      toggleCurrentPhotoInGallery(item);
     }
     return;
   }
@@ -290,7 +295,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     const returnLink = document.querySelector(".image-info > a");
-    if (document.referrer.startsWith(window.location.origin) && !new URL(document.referrer).pathname.startsWith("/image/")) {
+    if (document.referrer.startsWith(window.location.origin) && !new URL(document.referrer).pathname.includes("/photo/")) {
       window.history.back();
     } else {
       window.location.assign(returnLink.href);
@@ -346,11 +351,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "ArrowLeft" || event.key === "PageUp") {
     event.preventDefault();
     showPhotoPreviewData(triggers[Math.max(0, currentIndex - 1)], clusterPhotos);
-    history.pushState({photoId: preview.dataset.photoId}, "", `/image/${preview.dataset.photoId}`);
+    history.pushState({photoId: preview.dataset.photoId}, "", locationPhotoURL(preview.dataset.photoId));
   } else if (event.key === "ArrowRight" || event.key === "PageDown") {
     event.preventDefault();
     showPhotoPreviewData(triggers[Math.min(triggers.length - 1, currentIndex + 1)], clusterPhotos);
-    history.pushState({photoId: preview.dataset.photoId}, "", `/image/${preview.dataset.photoId}`);
+    history.pushState({photoId: preview.dataset.photoId}, "", locationPhotoURL(preview.dataset.photoId));
   } else if (event.key === " ") {
     event.preventDefault();
     const checkbox = document.querySelector("#photo-viewer-checkbox");
@@ -363,11 +368,7 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("popstate", () => {
   const viewer = document.querySelector("#photo-viewer");
   if (!viewer) return;
-  if (location.pathname.startsWith("/image/")) {
-    const id = location.pathname.split("/").pop();
-    const trigger = document.querySelector(`.photo-preview-trigger[data-photo-id="${id}"]`);
-    if (trigger) showPhotoPreview(trigger);
-  } else if (!viewer.hidden) {
+  if (!viewer.hidden) {
     closePhotoViewer();
   }
 });
@@ -500,6 +501,13 @@ document.addEventListener("htmx:beforeRequest", (event) => {
 });
 */
 
+function locationPhotoURL(photoID) {
+  let path = window.location.pathname;
+  path = path.replace(/\/map\/?$/, "");
+  path = path.replace(/\/photo\/[^/]+\/?$/, "");
+  return `${path.replace(/\/$/, "")}/photo/${photoID}`;
+}
+
 function initialisePhotoMap() {
   const element = document.querySelector("#photo-map");
   if (!element) return;
@@ -511,13 +519,24 @@ function initialisePhotoMap() {
   }
   element.dataset.initialised = "true";
   const mapURL = new URL(window.location.href);
-  const savedCenter = [Number(mapURL.searchParams.get("mapLng")), Number(mapURL.searchParams.get("mapLat"))];
-  const savedZoom = Number(mapURL.searchParams.get("mapZoom"));
+  const pathCriteria = mapURL.pathname.startsWith("/locations/")
+    ? new URLSearchParams(mapURL.pathname.slice("/locations/".length).replaceAll(",", "&"))
+    : mapURL.searchParams;
+  const savedCenter = [Number(pathCriteria.get("mapLng")), Number(pathCriteria.get("mapLat"))];
+  const savedZoom = Number(pathCriteria.get("mapZoom"));
   const hasSavedView = savedCenter.every(Number.isFinite) && Number.isFinite(savedZoom);
+  const initialMinLat = Number(element.dataset.minLat);
+  const initialMinLng = Number(element.dataset.minLng);
+  const initialMaxLat = Number(element.dataset.maxLat);
+  const initialMaxLng = Number(element.dataset.maxLng);
+  const hasInitialBounds = [initialMinLat, initialMinLng, initialMaxLat, initialMaxLng].every(Number.isFinite);
+  const initialCenter = hasInitialBounds
+    ? [(initialMinLng + initialMaxLng) / 2, (initialMinLat + initialMaxLat) / 2]
+    : [0, 20];
   const map = new maplibregl.Map({
     container: element,
-    center: hasSavedView ? savedCenter : [0, 20],
-    zoom: hasSavedView ? savedZoom : 2,
+    center: hasInitialBounds ? initialCenter : (hasSavedView ? savedCenter : [0, 20]),
+    zoom: hasInitialBounds ? 12 : (hasSavedView ? savedZoom : 2),
     style: {
       version: 8,
       sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, attribution: "&copy; OpenStreetMap contributors" } },
@@ -526,12 +545,21 @@ function initialisePhotoMap() {
   });
   let mapReturnURL = element.dataset.returnUrl || "/locations";
   function saveMapView() {
-    const center = map.getCenter();
-    const url = new URL(window.location.href);
-    url.searchParams.set("mapLat", center.lat.toFixed(6));
-    url.searchParams.set("mapLng", center.lng.toFixed(6));
-    url.searchParams.set("mapZoom", map.getZoom().toFixed(2));
-    window.history.replaceState({}, "", url.pathname + "?" + url.searchParams.toString());
+    if (!window.location.pathname.startsWith("/locations")) {
+      return;
+    }
+    const bounds = map.getBounds();
+    const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
+    const minLng = clamp(bounds.getWest(), -180, 180);
+    const maxLng = clamp(bounds.getEast(), -180, 180);
+    const minLat = clamp(bounds.getSouth(), -90, 90);
+    const maxLat = clamp(bounds.getNorth(), -90, 90);
+    const parts = [];
+    parts.push(`minLat=${minLat.toFixed(6)}`);
+    parts.push(`minLng=${minLng.toFixed(6)}`);
+    parts.push(`maxLat=${maxLat.toFixed(6)}`);
+    parts.push(`maxLng=${maxLng.toFixed(6)}`);
+    window.history.replaceState({}, "", `/locations/${parts.join(",")}`);
   }
   map.on("moveend", saveMapView);
   map.addControl(new maplibregl.NavigationControl(), "top-right");
@@ -542,21 +570,39 @@ function initialisePhotoMap() {
   let markers = [];
   const settlement = element.dataset.settlement || "";
   const region = element.dataset.region || "";
+  const photoId = element.dataset.photoId || "";
+  const photoIds = element.dataset.photoIds || "";
   const locationBounds = ["minLat", "minLng", "maxLat", "maxLng"]
     .map((key) => Number(element.dataset[key]))
     .every((value) => Number.isFinite(value));
-  if ((settlement || region) && locationBounds) map.fitBounds([[Number(element.dataset.minLng), Number(element.dataset.minLat)], [Number(element.dataset.maxLng), Number(element.dataset.maxLat)]], { padding: 20 });
+  if (locationBounds) {
+    map.fitBounds([[Number(element.dataset.minLng), Number(element.dataset.minLat)], [Number(element.dataset.maxLng), Number(element.dataset.maxLat)]], { padding: 20, maxZoom: 22 });
+  }
 
   function renderPoints(points) {
     markers.forEach((marker) => marker.remove());
     markers = points.map((point) => {
       const markerElement = document.createElement("button");
       markerElement.type = "button";
-      markerElement.className = "map-cluster";
-      markerElement.textContent = String(point.count);
-      markerElement.setAttribute("aria-label", `${point.count} photos`);
+      const atMaxZoom = map.getZoom() >= map.getMaxZoom() - 0.01;
+      if (point.count === 1 || atMaxZoom) {
+        markerElement.className = "map-photo-marker";
+        markerElement.setAttribute("aria-label", point.count === 1 ? "1 photo" : `${point.count} photos`);
+        const image = document.createElement("img");
+        image.src = `/thumbnails/${point.photoId}`;
+        image.alt = "";
+        markerElement.append(image);
+      } else {
+        markerElement.className = "map-cluster";
+        markerElement.textContent = String(point.count);
+        markerElement.setAttribute("aria-label", `${point.count} photos`);
+      }
       markerElement.addEventListener("click", () => {
         const bounds = [[point.minLongitude, point.minLatitude], [point.maxLongitude, point.maxLatitude]];
+        if (point.count === 1 || map.getZoom() >= map.getMaxZoom() - 0.01) {
+          window.location.assign(locationPhotoURL(point.photoId));
+          return;
+        }
         if (map.getZoom() < clusterPhotoZoom) {
           map.fitBounds(bounds, { padding: 40, maxZoom: clusterPhotoZoom });
           return;
@@ -575,7 +621,7 @@ function initialisePhotoMap() {
             checkbox.setAttribute("aria-label", `Select ${photo.path}`);
             const link = document.createElement("a");
             link.className = "photo-preview-trigger";
-            link.href = `/image/${photo.photoId}?from=${encodeURIComponent(clusterURL)}`;
+            link.href = locationPhotoURL(photo.photoId);
             link.dataset.photoId = String(photo.photoId);
             link.dataset.photoPath = photo.path;
             link.dataset.photoTakenAt = photo.takenAt;
@@ -609,6 +655,8 @@ function initialisePhotoMap() {
           minLng: point.minLongitude,
           maxLng: point.maxLongitude
         });
+        if (Number(photoId) > 0) params.set("photoId", photoId);
+        if (photoIds) params.set("photoIds", photoIds);
         fetch(`/api/map-cluster?${params}`)
           .then((response) => { if (!response.ok) throw new Error("Could not load cluster photos"); return response.json(); })
           .then((photos) => {
@@ -632,6 +680,10 @@ function initialisePhotoMap() {
       minLng: Math.max(-180, bounds.getWest()), maxLng: Math.min(180, bounds.getEast()),
       zoom: Math.floor(map.getZoom())
     });
+    if (Number(photoId) > 0) params.set("photoId", photoId);
+    if (photoIds) params.set("photoIds", photoIds);
+    if (settlement) params.set("settlement", settlement);
+    if (region) params.set("region", region);
     const key = params.toString();
     const status = document.querySelector("#map-status");
     if (cache.has(key)) { renderPoints(cache.get(key)); return; }
@@ -646,7 +698,7 @@ function initialisePhotoMap() {
   }
 
   map.on("load", () => {
-    if ((settlement || region) && locationBounds) map.fitBounds([[Number(element.dataset.minLng), Number(element.dataset.minLat)], [Number(element.dataset.maxLng), Number(element.dataset.maxLat)]], { padding: 20 });
+    if (locationBounds) map.fitBounds([[Number(element.dataset.minLng), Number(element.dataset.minLat)], [Number(element.dataset.maxLng), Number(element.dataset.maxLat)]], { padding: 20, maxZoom: 22 });
     loadPoints();
   });
   map.on("moveend", loadPoints);
@@ -658,10 +710,6 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initialisePhotoMap);
 } else {
   initialisePhotoMap();
-}
-if (location.pathname.startsWith("/image/")) {
-  const trigger = document.querySelector(".photo-preview-trigger");
-  if (trigger) showPhotoPreview(trigger);
 }
 
 window.addEventListener("load", initialisePhotoMap);
