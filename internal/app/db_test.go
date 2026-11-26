@@ -1,12 +1,229 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"math"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestSQLDebugLogging(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true})))
+	defer slog.SetDefault(previous)
+
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if !strings.Contains(output.String(), `"sql":"CREATE TABLE IF NOT EXISTS photos`) ||
+		!strings.Contains(output.String(), `"sql":"CREATE TABLE IF NOT EXISTS collections`) {
+		t.Fatal("schema statements were not logged separately")
+	}
+	output.Reset()
+
+	const create = `CREATE TEMP TABLE log_test (value TEXT)`
+	const single = `SELECT ?`
+	const list = `SELECT value FROM log_test`
+	const insert = `INSERT INTO log_test (value) VALUES (?)`
+	const count = `SELECT COUNT(*) FROM log_test`
+	const invalid = `SELECT missing FROM log_test`
+	_, _, createLine, _ := runtime.Caller(0)
+	if _, err := db.sql.ExecContext(ctx, create); err != nil {
+		t.Fatal(err)
+	}
+	var value string
+	if err := db.sql.QueryRowContext(ctx, single, "sensitive-bound-value").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.sql.QueryContext(ctx, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, insert, "first"); err != nil {
+		t.Fatal(err)
+	}
+	var total int
+	if err := tx.QueryRowContext(ctx, count).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.PrepareContext(ctx, insert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{"second", "third"} {
+		if _, err := stmt.ExecContext(ctx, arg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, invalid); err == nil {
+		t.Fatal("invalid statement unexpectedly succeeded")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{create, single, list, insert, count, insert, insert, invalid}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("got %d log entries, want %d: %s", len(lines), len(want), output.String())
+	}
+	for i, line := range lines {
+		var entry struct {
+			Level  string      `json:"level"`
+			SQL    string      `json:"sql"`
+			Source slog.Source `json:"source"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Level != "DEBUG" || entry.SQL != want[i] {
+			t.Errorf("log entry %d = %+v, want DEBUG and %q", i, entry, want[i])
+		}
+		if !strings.HasSuffix(entry.Source.Function, ".TestSQLDebugLogging") || filepath.Base(entry.Source.File) != "db_test.go" || entry.Source.Line == 0 {
+			t.Errorf("log entry %d has incorrect caller: %+v", i, entry.Source)
+		}
+		if i == 0 && entry.Source.Line != createLine+1 {
+			t.Errorf("first log source line = %d, want %d", entry.Source.Line, createLine+1)
+		}
+	}
+	if strings.Contains(output.String(), "sensitive-bound-value") {
+		t.Fatal("bound parameter value appeared in SQL logs")
+	}
+
+	output.Reset()
+	if _, err := db.CollectionExists(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Source slog.Source `json:"source"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(entry.Source.Function, ".(*DB).CollectionExists") || filepath.Base(entry.Source.File) != "db.go" || entry.Source.Line == 0 {
+		t.Fatalf("database method source = %+v", entry.Source)
+	}
+	output.Reset()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if err := db.sql.QueryRowContext(ctx, single, "ignored").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("SQL was logged above debug level: %s", output.String())
+	}
+}
+
+func TestSelectedCollectionMigration(t *testing.T) {
+	for _, occupied := range []bool{false, true} {
+		t.Run(strconv.FormatBool(occupied), func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "test.db")
+			db, err := OpenDB(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := db.selectedCollectionID(ctx)
+			if err != nil || id != 0 {
+				t.Fatalf("new selected collection = %d, %v; want 0", id, err)
+			}
+			now := time.Now().UTC()
+			for _, name := range []string{"selected.jpg", "other.jpg"} {
+				if err := db.UpsertPhoto(ctx, PhotoRecord{Path: name, TakenAt: now, IndexedAt: now, MediaType: "photo"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.SelectPhotos(ctx, []int64{1}); err != nil {
+				t.Fatal(err)
+			}
+			regularID, err := db.CreateGallery(ctx, "regular")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AddPhotosToGallery(ctx, regularID, []int64{2}); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.sql.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range []string{
+				`PRAGMA defer_foreign_keys = ON`,
+				`UPDATE collections SET id = 9 WHERE id = 0`,
+				`UPDATE collection_photos SET collection_id = 9 WHERE collection_id = 0`,
+			} {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if occupied {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO collections (id, name) VALUES (0, 'occupied')`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO collection_photos (collection_id, photo_id) VALUES (0, 2)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err = OpenDB(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			id, err = db.selectedCollectionID(ctx)
+			if err != nil || id != 0 {
+				t.Fatalf("migrated selected collection = %d, %v; want 0", id, err)
+			}
+			photos, err := db.PhotosForGallery(ctx, id)
+			if err != nil || len(photos) != 1 || photos[0].ID != 1 {
+				t.Fatalf("selected photos = %+v, %v", photos, err)
+			}
+			photos, err = db.PhotosForGallery(ctx, regularID)
+			if err != nil || len(photos) != 1 || photos[0].ID != 2 {
+				t.Fatalf("regular gallery photos = %+v, %v", photos, err)
+			}
+			if occupied {
+				var occupiedID int64
+				if err := db.sql.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = 'occupied'`).Scan(&occupiedID); err != nil {
+					t.Fatal(err)
+				}
+				photos, err = db.PhotosForGallery(ctx, occupiedID)
+				if occupiedID == 0 || err != nil || len(photos) != 1 || photos[0].ID != 2 {
+					t.Fatalf("relocated gallery %d photos = %+v, %v", occupiedID, photos, err)
+				}
+			}
+			if err := db.migrateSelectedCollection(ctx); err != nil {
+				t.Fatalf("repeat migration: %v", err)
+			}
+		})
+	}
+}
 
 func TestPlaceBounds(t *testing.T) {
 	ctx := context.Background()

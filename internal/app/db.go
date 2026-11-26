@@ -20,6 +20,9 @@ const timeLayout = "2006-01-02 15:04:05.000000"
 // SelectedCollectionName is the reserved collection that holds the user's current photo selection.
 const SelectedCollectionName = "selected"
 
+// SelectedCollectionID is the fixed ID of the reserved selected collection.
+const SelectedCollectionID int64 = 0
+
 // ErrProtectedCollection is returned when attempting to delete the selected collection.
 var ErrProtectedCollection = errors.New("the selected collection cannot be deleted")
 
@@ -32,7 +35,7 @@ type SavedSearch struct {
 
 // DB wraps the SQLite database. All SQL used by the application lives in this file.
 type DB struct {
-	sql *sql.DB
+	sql *loggedDB
 }
 
 // PhotoRecord holds the values written to the photos table when a file is indexed.
@@ -66,7 +69,7 @@ func OpenDB(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	db := &DB{sql: conn}
+	db := &DB{sql: &loggedDB{loggedQuerier: loggedQuerier{querier: conn}, db: conn}}
 	if err := conn.PingContext(ctx); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("connect to database: %w", err)
@@ -85,8 +88,7 @@ func (d *DB) Close() error {
 
 // migrate creates application tables and indexes.
 func (d *DB) migrate(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS photos (
+	schema := []string{`CREATE TABLE IF NOT EXISTS photos (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			path TEXT UNIQUE NOT NULL,
 			raw_path TEXT,
@@ -108,39 +110,36 @@ func (d *DB) migrate(ctx context.Context) error {
 			duration_seconds REAL,
 			day_of_year INTEGER,
 			indexed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f000', 'now'))
-		);
-		CREATE TABLE IF NOT EXISTS index_state (
+		)`, `CREATE TABLE IF NOT EXISTS index_state (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			last_indexed_at TEXT NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS collections (
+		)`, `CREATE TABLE IF NOT EXISTS collections (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT UNIQUE NOT NULL CHECK (length(trim(name)) > 0),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f000', 'now'))
-		);
-		CREATE TABLE IF NOT EXISTS collection_photos (
+		)`, `CREATE TABLE IF NOT EXISTS collection_photos (
 			collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
 			photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
 			PRIMARY KEY (collection_id, photo_id)
-		);
-		CREATE TABLE IF NOT EXISTS saved_searches (
+		)`, `CREATE TABLE IF NOT EXISTS saved_searches (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			url TEXT NOT NULL UNIQUE CHECK (length(trim(url)) > 0),
 			title TEXT NOT NULL CHECK (length(trim(title)) > 0),
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f000', 'now')),
 			UNIQUE(url)
-		);
-		CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at);
-		CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
-			WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
-		CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type);
-		CREATE INDEX IF NOT EXISTS photos_day_of_year ON photos (day_of_year);`)
-	if err != nil {
-		slog.Error("migrate database", "error", err)
-		return fmt.Errorf("migrate database: %w", err)
+		)`, `CREATE INDEX IF NOT EXISTS photos_taken_at_idx ON photos (taken_at)`,
+		`CREATE INDEX IF NOT EXISTS photos_location_idx ON photos (latitude, longitude)
+			WHERE latitude IS NOT NULL AND longitude IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS photos_media_type_idx ON photos (media_type)`,
+		`CREATE INDEX IF NOT EXISTS photos_day_of_year ON photos (day_of_year)`}
+	for _, statement := range schema {
+		if _, err := d.sql.ExecContext(ctx, statement); err != nil {
+			slog.Error("migrate database", "error", err)
+			return fmt.Errorf("migrate database: %w", err)
+		}
 	}
-	if _, err := d.sql.ExecContext(ctx, `INSERT OR IGNORE INTO collections (name) VALUES (?)`, SelectedCollectionName); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
+	if err := d.migrateSelectedCollection(ctx); err != nil {
+		return fmt.Errorf("migrate selected collection: %w", err)
 	}
 	if err := d.addColumnIfMissing(ctx, "photos", "golden_hour", "INTEGER"); err != nil {
 		return err
@@ -161,6 +160,55 @@ func (d *DB) migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	return nil
+}
+
+// migrateSelectedCollection reserves ID zero for the selected collection, preserving memberships.
+// Input: a migration context; output: an error if the transactional migration fails.
+func (d *DB) migrateSelectedCollection(ctx context.Context) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return err
+	}
+
+	var existingName string
+	err = tx.QueryRowContext(ctx, `SELECT name FROM collections WHERE id = ?`, SelectedCollectionID).Scan(&existingName)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && existingName != SelectedCollectionName {
+		var replacementID int64
+		if err := tx.QueryRowContext(ctx, `SELECT MAX(id) + 1 FROM collections`).Scan(&replacementID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE collections SET id = ? WHERE id = ?`, replacementID, SelectedCollectionID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE collection_photos SET collection_id = ? WHERE collection_id = ?`, replacementID, SelectedCollectionID); err != nil {
+			return err
+		}
+	}
+
+	var selectedID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM collections WHERE name = ?`, SelectedCollectionName).Scan(&selectedID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		_, err = tx.ExecContext(ctx, `INSERT INTO collections (id, name) VALUES (?, ?)`, SelectedCollectionID, SelectedCollectionName)
+	case err != nil:
+		return err
+	case selectedID != SelectedCollectionID:
+		if _, err = tx.ExecContext(ctx, `UPDATE collections SET id = ? WHERE id = ?`, SelectedCollectionID, selectedID); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE collection_photos SET collection_id = ? WHERE collection_id = ?`, SelectedCollectionID, selectedID)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // EPSG900913Project converts WGS84 latitude/longitude into metres in EPSG:900913.
@@ -295,14 +343,20 @@ func (d *DB) UpdateGoldenHour(ctx context.Context) (int, error) {
 	return len(updates), nil
 }
 
+// formatTime converts a timestamp to the fixed-width UTC format used by SQLite.
+// Input: a timestamp; output: its UTC database representation.
 func formatTime(t time.Time) string {
 	return t.UTC().Format(timeLayout)
 }
 
+// parseTime parses a database timestamp as UTC.
+// Input: the stored timestamp string; output: the parsed time or a parse error.
 func parseTime(value string) (time.Time, error) {
 	return time.ParseInLocation(timeLayout, value, time.UTC)
 }
 
+// encodeStrings serializes string values as JSON, encoding nil as an empty array.
+// Input: a string slice; output: its JSON representation.
 func encodeStrings(values []string) string {
 	if values == nil {
 		values = []string{}
@@ -311,6 +365,8 @@ func encodeStrings(values []string) string {
 	return string(encoded)
 }
 
+// decodeStrings deserializes a JSON string array, treating an empty value as no strings.
+// Input: the stored JSON string; output: decoded values or a JSON parse error.
 func decodeStrings(value string) ([]string, error) {
 	var values []string
 	if value == "" {
@@ -360,6 +416,8 @@ func scanPhoto(row rowScanner, extra ...any) (Photo, error) {
 const photoColumns = `id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''),
 	camera_model, focal_length, flash_fired, objects, dominant_colors`
 
+// queryPhotos executes a parameterized photo query and scans every result row.
+// Inputs: a context, SQL query, and query arguments; outputs: matching photos or an error.
 func (d *DB) queryPhotos(ctx context.Context, query string, args ...any) ([]Photo, error) {
 	rows, err := d.sql.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -378,6 +436,8 @@ func (d *DB) queryPhotos(ctx context.Context, query string, args ...any) ([]Phot
 	return photos, rows.Err()
 }
 
+// queryStrings executes a parameterized query whose rows each contain one string.
+// Inputs: a context, SQL query, and query arguments; outputs: returned strings or an error.
 func (d *DB) queryStrings(ctx context.Context, query string, args ...any) ([]string, error) {
 	rows, err := d.sql.QueryContext(ctx, query, args...)
 	if err != nil {

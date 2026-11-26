@@ -117,26 +117,86 @@ files and is not considered a successful checkpointing run.
 Because job state is in memory, restarting the application stops any active index.
 The next **Index photos** run safely resumes from the last completed checkpoint.
 
-## Current UI and routes
+## HTTP API
 
-| Route | Behavior |
-|---|---|
-| `GET /` | Timeline: reverse-chronological month sidebar; selected month photos in chronological order |
-| `GET /months/{YYYY-MM}` | HTMX partial photo-grid update for a timeline month |
-| `GET /locations` | Chronological list of geotagged photos; currently not an interactive map |
-| `GET /galleries` | Custom gallery list with membership counts |
-| `GET /galleries/{id}` | Chronological custom-gallery photo grid |
-| `POST /galleries` | Adds selected photo IDs to an existing gallery or creates a named gallery then adds them |
-| `POST /download` | ZIP of selected image files and same-basename `.xmp`/`.json` sidecars; `raw=true` also includes associated raw files |
-| `POST /index`, `POST /reindex`, `POST /stop-indexing` | Starts or stops the background indexing job |
+The application serves server-rendered HTML for pages and partial updates, JSON for
+map data and indexing progress, and media files directly from the indexed library.
+The selection and gallery endpoints are intended for same-origin browser requests.
+Selections are stored in the reserved selected gallery (ID `0`) in SQLite and are shared by
+clients using the same database. It is omitted from gallery lists and available at
+`/selected`; legacy `/galleries/0` and `/gallery/0` links redirect there.
+
+### Pages and media
+
+| Method and path | Inputs | Response |
+|---|---|---|
+| `GET /` | None | Timeline HTML showing the newest month |
+| `GET /maintenance` | None | Indexing controls and progress page |
+| `GET /timeline/{YYYY}/{MM}` or `GET /timeline/{YYYY-MM}` | Month in path; optional `/photo/{id}` or `/map` suffix | Timeline HTML, photo detail, or collection map |
+| `GET /months/{YYYY-MM}` | Month in path | Timeline HTML partial for HTMX |
+| `GET /search[/{criteria}]` | Optional filters `from`, `to`, `label`, `color`, `camera`, `focal`, `flash`, and `location`; criteria may be query parameters or comma-separated path pairs | Search HTML; path filters use the same names |
+| `GET /this-week` | Optional `/photo/{id}` or `/map` suffix | This-week gallery HTML, photo detail, or map |
+| `GET /locations[/{criteria}]` | Optional `place`, `settlement`, `region`, bounds (`minLat`, `minLng`, `maxLat`, `maxLng`), map center/zoom, or photo ID filters | Interactive map page; invalid bounds return `400` |
+| `GET /cluster` | Bounds `minLat`, `maxLat`, `minLng`, `maxLng`; optional `map` return URL or `photoId` | HTML photo grid for the cluster |
+| `GET /galleries` | None | Gallery list HTML |
+| `GET /selected` | Optional `/photo/{id}` or `/map` suffix | Selected photo grid, photo detail, or map |
+| `GET /galleries/{id}` or `/gallery/{id}` | Gallery ID; optional `/photo/{id}` or `/map` suffix | Gallery HTML, photo detail, or map |
+| `GET /similar/{photoId}`, `/near-to/{photoId}`, `/random` | Target photo ID where applicable; optional photo/map suffix | A generated photo collection as HTML |
+| `GET /photos/{id}` | Indexed photo ID | Original image or video |
+| `GET /thumbnails/{id}` | Indexed photo ID | Stored JPEG thumbnail, or original file if no thumbnail exists |
+| `GET /raw/{id}` | Indexed photo ID | Associated raw file as an attachment |
+| `GET /static/{path}` | Embedded asset path | Static application asset |
+
+### Mutations and downloads
+
+| Method and path | Inputs | Response |
+|---|---|---|
+| `POST /gallery` | Form fields `ids` (comma-separated photo IDs) and either `gallery_id` or `collection_id`, or `name` to create a gallery | `204` with `HX-Redirect` to the gallery; invalid or empty selections return `400` |
+| `DELETE /gallery/` | Form/query fields `ids` and `gallery_id` (or `collection_id`) | Removes the IDs from that gallery; `204` with `HX-Redirect` |
+| `DELETE /galleries/{id}` | Gallery ID in path | Deletes the gallery; `204` with `HX-Redirect`; the protected selected gallery returns `403` |
+| `POST /selection` or `DELETE /selection` | Form field `ids`, a comma-separated list of positive photo IDs | Adds or removes IDs from the reserved selected gallery; `204` |
+| `POST /selection/clear` | None | Clears the reserved selected gallery; `204` |
+| `POST /galleries/0/remove` | Form field `ids` | Removes those IDs from the reserved selected gallery; `204` |
+| `POST /saved-searches` | Form field `url` containing a local `/search` URL | Saves the search; `204` with `HX-Redirect` |
+| `DELETE /saved-searches/{id}` | Saved-search ID in path | Deletes the saved search; `204` with `HX-Redirect` |
+| `POST /download/{context}` | Query field `ids`; optional `raw=true` | ZIP containing selected originals and adjacent `.xmp`/`.json` sidecars; raw files are included when requested |
+| `POST /index` | None | Starts incremental indexing; `204`, or `409` if an index is already running |
+| `POST /reindex` | None | Starts a full reindex; `204`, or `409` if an index is already running |
+| `POST /stop-indexing` | None | Cancels active indexing; `204`, or `409` if no index is active |
+
+### JSON endpoints
+
+`GET /api/map-points` returns a JSON array of map points. Normal viewport requests
+require `minLat`, `maxLat`, `minLng`, `maxLng`, and `zoom` (0–22); `settlement` and
+`region` optionally filter the result. `photoId` or comma-separated `photoIds` selects
+specific photos instead of using viewport bounds. Each point includes `latitude`,
+`longitude`, `count`, `photoId`, and its `minLatitude`, `minLongitude`, `maxLatitude`,
+and `maxLongitude`; path, capture time, and location may also be present. Invalid
+coordinates or zoom values return `400`.
+
+`GET /api/map-cluster` accepts the same coordinate bounds or the `photoId`/
+`photoIds` selector and returns the geotagged photo records within that selection.
+The records include coordinates, ID, path, capture time, and location. Both map
+endpoints set `Cache-Control: private, max-age=30` for normal bounds queries.
+
+`GET /index-progress` returns JSON with `active`, `processed`, `total`, `percentage`,
+and `message` fields for indexing, plus a `detection` object with the corresponding
+background object-detection status fields.
+
+### DLNA endpoints
+
+The server advertises itself on the local network using SSDP. DLNA clients use
+`GET /dlna/description.xml` and `GET /dlna/contentdirectory.xml` for device/service
+metadata, `POST /dlna/control` for SOAP Browse requests, and
+`GET /dlna/resource/{id}` or `GET /dlna/thumbnail/{id}` for media resources.
 
 Photo preview supports left/right and Page Up/Page Down navigation. In selectable
 photo grids, it displays whether the current photo is selected and lets the user
 synchronize that selection with the grid.
 
-Selections are persisted in SQLite in `selection_photos`, keyed by a random
-browser-session cookie. The `/selection` endpoints synchronize visible checkboxes,
-and `/selected` renders the complete server-side selection across all views.
+Selections are persisted in SQLite as memberships in the reserved selected gallery.
+The `/selection` endpoints synchronize visible checkboxes, and the selected gallery
+renders the complete persisted selection across views.
 
 Photo rows also store `raw_path` when a recognised raw-camera file shares the
 image basename in the same directory. Raw files are not indexed as photos; they

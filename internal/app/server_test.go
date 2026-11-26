@@ -28,7 +28,7 @@ func TestRemoveSelectedGalleryPhoto(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{db: db}
-	request := httptest.NewRequest(http.MethodPost, "/galleries/1/remove", strings.NewReader("ids=19"))
+	request := httptest.NewRequest(http.MethodPost, "/galleries/0/remove", strings.NewReader("ids=19"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 	server.removeSelectedGalleryPhotos(response, request)
@@ -41,6 +41,136 @@ func TestRemoveSelectedGalleryPhoto(t *testing.T) {
 	}
 	if selected[19] {
 		t.Fatal("photo 19 remained selected")
+	}
+}
+
+func TestSelectedGalleryRoutes(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	latitude, longitude := 51.5, -0.12
+	if err := db.UpsertPhoto(ctx, PhotoRecord{Path: "selected.jpg", TakenAt: now, IndexedAt: now, MediaType: "photo", Latitude: &latitude, Longitude: &longitude}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SelectPhotos(ctx, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	galleryID, err := db.CreateGallery(ctx, "ordinary")
+	if err != nil || galleryID != 1 {
+		t.Fatalf("ordinary gallery = %d, %v; want ID 1", galleryID, err)
+	}
+	if _, err := db.AddPhotosToGallery(ctx, galleryID, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := server.Routes()
+	defer server.dlnaCancel()
+
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/selected", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "selected.jpg") ||
+		!strings.Contains(response.Body.String(), `href="/selected/photo/1"`) {
+		t.Fatalf("selected page = %d, body %s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{"/selected/photo/1", "/galleries/1"} {
+		response = httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "selected.jpg") {
+			t.Errorf("%s = %d, body %s", path, response.Code, response.Body.String())
+		}
+	}
+	response = httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/selected/photo/1", nil))
+	if !strings.Contains(response.Body.String(), `href="/selected"`) || !strings.Contains(response.Body.String(), `href="/selected/photo/1/map"`) {
+		t.Fatalf("selected photo lost its navigation context: %s", response.Body.String())
+	}
+	for _, path := range []string{"/selected/map", "/selected/photo/1/map"} {
+		response = httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `id="photo-map"`) {
+			t.Errorf("%s = %d, body %s", path, response.Code, response.Body.String())
+		}
+	}
+	for _, path := range []string{"/galleries", "/galleries/1", "/search"} {
+		response = httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		body := response.Body.String()
+		if response.Code != http.StatusOK || strings.Contains(body, `href="/galleries/0"`) || strings.Contains(body, `<option value="0">`) {
+			t.Errorf("%s exposes selected gallery: %d, body %s", path, response.Code, body)
+		}
+	}
+	for path, location := range map[string]string{
+		"/galleries/0": "/selected", "/gallery/0/photo/1/map": "/selected/photo/1/map",
+	} {
+		response = httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != location {
+			t.Errorf("%s redirect = %d, %q; want %q", path, response.Code, response.Header().Get("Location"), location)
+		}
+	}
+	response = httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/galleries/0", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("delete selected status = %d, want 403", response.Code)
+	}
+	response = httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/galleries/0/remove", strings.NewReader("ids=1"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	routes.ServeHTTP(response, request)
+	selected, err := db.SelectedPhotoIDs(ctx)
+	if response.Code != http.StatusNoContent || err != nil || len(selected) != 0 {
+		t.Fatalf("remove selected = %d, %v, %v", response.Code, selected, err)
+	}
+	photos, err := db.PhotosForGallery(ctx, galleryID)
+	if err != nil || len(photos) != 1 {
+		t.Fatalf("ordinary gallery after unselect = %+v, %v", photos, err)
+	}
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/gallery", strings.NewReader("gallery_id=0&ids=1"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	routes.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || response.Header().Get("HX-Redirect") != "/selected" {
+		t.Fatalf("add to selected = %d, redirect %q", response.Code, response.Header().Get("HX-Redirect"))
+	}
+}
+
+func TestSelectedAndGalleryListWhenEmpty(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := &Server{db: db}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := server.Routes()
+	defer server.dlnaCancel()
+	for path, message := range map[string]string{
+		"/selected":  "No photos found",
+		"/galleries": "No galleries yet.",
+	} {
+		response := httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), message) ||
+			strings.Contains(response.Body.String(), `href="/galleries/0"`) {
+			t.Errorf("%s = %d, body %s", path, response.Code, response.Body.String())
+		}
+	}
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/selected/photo/99", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown selected photo = %d, want 404", response.Code)
 	}
 }
 

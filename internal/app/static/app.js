@@ -3,8 +3,8 @@ document.body.addEventListener('htmx:configRequest', function(evt) {
     console.log(evt);
 });
 
-//this function updates the action-menu-panel - if there are no photos selected then
-//disable all of the menu buttons except for that with the id select-all, otherwise enable them all
+// Updates action-menu button availability from the current checkbox state.
+// Input: none; output: none (updates the page).
 function updateActionMenu() {
   const selectedCount = document.querySelectorAll("[data-photo-selection]:checked").length;
   const actionMenu = document.querySelector(".action-menu-panel");
@@ -21,6 +21,8 @@ function updateActionMenu() {
 }
 
 
+// Toggles one photo's checkbox and persists the resulting selection.
+// Input: a photo ID; output: none.
 function toggleOne(id) {
   const input = document.querySelector(`[data-photo-selection][value="${id}"]`);
   if (input) {
@@ -30,7 +32,8 @@ function toggleOne(id) {
   updateActionMenu();
 }
 
-//persists selection changes to the reserved selected gallery
+// Persists photo IDs as selected or unselected in the server-side selection.
+// Inputs: photo ID strings and the desired selected state; output: none.
 function persistSelection(ids, selected) {
   const validIDs = ids.map((id) => String(id).trim()).filter((id) => /^\d+$/.test(id));
   if (validIDs.length === 0) return;
@@ -40,28 +43,38 @@ function persistSelection(ids, selected) {
   });
 }
 
+// Sets all visible photo checkboxes and persists only changed IDs.
+// Input: whether visible photos should be selected; output: none.
 function setPageSelection(selected) {
   const ids = [];
   document.querySelectorAll("[data-photo-selection]").forEach((input) => {
     const id = String(input.value).trim();
     if (/^\d+$/.test(id) && input.checked !== selected) ids.push(id);
     input.checked = selected;
+    if (!selected && /^\/selected\/?$/.test(window.location.pathname)) input.closest(".photo")?.remove();
   });
   persistSelection(ids, selected);
   updateActionMenu();
 }
 
+// Selects every photo checkbox on the current page.
+// Input: none; output: none.
 function selectAll() {
   setPageSelection(true);
 }
 
+// Clears the selection state of every photo checkbox on the current page.
+// Input: none; output: none.
 function selectNone() {
   setPageSelection(false);
 }
 
+// Clears the visible checkboxes and the complete server-side selection.
+// Input: none; output: none.
 function clearSelection() {
   document.querySelectorAll("[data-photo-selection]").forEach((input) => {
     input.checked = false;
+    if (/^\/selected\/?$/.test(window.location.pathname)) input.closest(".photo")?.remove();
   });
   fetch("/selection/clear", { method: "POST" }).catch((error) => {
     console.error("Could not clear selection", error);
@@ -76,12 +89,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!event.target.matches("[data-photo-selection]")) return;
     const photoID = String(event.target.value).trim();
     persistSelection([photoID], event.target.checked);
-    const match = window.location.pathname.match(/^\/galleries\/(\d+)/);
-    if (match && match[1] === "1" && !event.target.checked) {
-      const body = new URLSearchParams({ ids: photoID });
-      fetch("/galleries/1/remove", { method: "POST", body }).catch((error) => {
-        console.error("Could not remove photo from selected gallery", error);
-      });
+    if (/^\/selected\/?$/.test(window.location.pathname) && !event.target.checked) {
       event.target.closest(".photo")?.remove();
     }
     updateActionMenu();
@@ -134,6 +142,8 @@ document.addEventListener("htmx:responseError", (event) => {
   error.hidden = false;
 });
 
+// Opens the photo viewer using metadata stored on a preview trigger element.
+// Input: a photo preview DOM element; output: none.
 function showPhotoPreview(trigger) {
   showPhotoPreviewData({
     photoId: trigger.dataset.photoId,
@@ -143,6 +153,8 @@ function showPhotoPreview(trigger) {
   }, null);
 }
 
+// Displays a photo in the viewer, optionally retaining a cluster's navigation list.
+// Inputs: photo metadata and an optional cluster photo array; output: none.
 function showPhotoPreviewData(data, clusterPhotos) {
   const preview = document.querySelector("#photo-viewer");
   const image = preview.querySelector("img");
@@ -162,6 +174,8 @@ function showPhotoPreviewData(data, clusterPhotos) {
   preview.hidden = false;
 }
 
+// Synchronizes the viewer checkbox with the matching grid photo and persists changes.
+// Input: none; output: none.
 function updatePreviewSelection() {
   const preview = document.querySelector("#photo-viewer");
   if (preview.hidden && !preview.dataset.photoId) return;
@@ -179,6 +193,7 @@ document.addEventListener("change", (event) => {
 });
 
 // Adds or removes the current photo from a gallery without leaving the page.
+// Input: a gallery shortcut element; output: a promise resolving after the request and UI update.
 async function toggleCurrentPhotoInGallery(item) {
   const photoId = document.querySelector("#image-gallery-dialog").dataset.photoId;
   const status = document.querySelector("#gallery-status");
@@ -199,6 +214,8 @@ async function toggleCurrentPhotoInGallery(item) {
 const MAX_ZOOM_LEVEL = 8;
 const zoomState = { level: 0, x: 0, y: 0 };
 
+// Applies the current zoom and pan state to the displayed image.
+// Input: none; output: none.
 function applyZoom() {
   const image = document.querySelector(".image-panel img");
   if (!image) return;
@@ -211,11 +228,15 @@ function applyZoom() {
   image.closest(".image-panel").classList.toggle("zoomed", zoomState.level > 0);
 }
 
+// Changes the zoom level within supported bounds and reapplies the transform.
+// Input: a signed zoom-step delta; output: none.
 function zoomBy(delta) {
   zoomState.level = Math.max(0, Math.min(MAX_ZOOM_LEVEL, zoomState.level + delta));
   applyZoom();
 }
 
+// Moves the zoomed image by a fraction of its displayed dimensions.
+// Inputs: horizontal and vertical pan directions; output: none.
 function panBy(dx, dy) {
   const image = document.querySelector(".image-panel img");
   if (!image || zoomState.level === 0) return;
@@ -224,10 +245,14 @@ function panBy(dx, dy) {
   applyZoom();
 }
 
+// Toggles the image-page sidebar's hidden state.
+// Input: none; output: none.
 function toggleSidebar() {
   document.body.classList.toggle("sidebar-hidden");
 }
 
+// Adds the current image to a gallery and reports the result in the dialog.
+// Input: gallery form fields; output: a promise resolving to whether the addition succeeded.
 async function addCurrentPhotoToGallery(fields) {
   const photoId = document.querySelector("#image-gallery-dialog").dataset.photoId;
   const body = new URLSearchParams({ ids: photoId, ...fields });
@@ -242,6 +267,8 @@ async function addCurrentPhotoToGallery(fields) {
   return true;
 }
 
+// Connects the image-gallery dialog controls and form to gallery actions.
+// Input: none; output: none.
 function setupImageGalleryDialog() {
   const dialog = document.querySelector("#image-gallery-dialog");
   if (!dialog) return;
@@ -249,6 +276,8 @@ function setupImageGalleryDialog() {
   const nameLabel = dialog.querySelector("#image-gallery-name-label");
   const nameInput = nameLabel.querySelector("input");
   const error = dialog.querySelector("#image-gallery-error");
+  // Shows the new-gallery name field only when no existing gallery is selected.
+  // Input: none; output: none.
   const syncName = () => {
     nameLabel.hidden = select.value !== "";
   };
@@ -385,6 +414,8 @@ window.addEventListener("popstate", () => {
   }
 });
 
+// Hides the photo preview overlay.
+// Input: none; output: none.
 function closePhotoViewer() {
   const viewer = document.querySelector("#photo-viewer");
   viewer.hidden = true;
@@ -392,7 +423,8 @@ function closePhotoViewer() {
 
 let indexProgressTimer;
 
-//update the indexing progress every 500ms if indexing is active
+// Enables or disables indexing controls according to whether an index is running.
+// Input: whether indexing is active; output: none.
 function setIndexingControls(active) {
   console.log("setIndexingControls", active);
   const stop = document.querySelector("[data-stop-indexing]");
@@ -404,6 +436,8 @@ function setIndexingControls(active) {
   stop.hidden = !active;
 }
 
+// Fetches indexing/detection progress and updates status text and polling.
+// Input: none; output: none.
 function updateIndexProgress() {
   const status = document.querySelector("#index-progress");
   const detectionStatus = document.querySelector("#detection-progress");
@@ -513,6 +547,8 @@ document.addEventListener("htmx:beforeRequest", (event) => {
 });
 */
 
+// Builds the current collection's photo-detail URL for a photo ID.
+// Input: a photo ID; output: a relative URL path.
 function locationPhotoURL(photoID) {
   let path = window.location.pathname;
   path = path.replace(/\/map\/?$/, "");
@@ -520,6 +556,8 @@ function locationPhotoURL(photoID) {
   return `${path.replace(/\/$/, "")}/photo/${photoID}`;
 }
 
+// Initializes the map, loads visible markers, and wires cluster and viewport actions.
+// Input: none; output: none.
 function initialisePhotoMap() {
   const element = document.querySelector("#photo-map");
   if (!element) return;
@@ -556,11 +594,15 @@ function initialisePhotoMap() {
     }
   });
   let mapReturnURL = element.dataset.returnUrl || "/locations";
+  // Saves the current map bounds in the locations URL.
+  // Input: none; output: none.
   function saveMapView() {
     if (!window.location.pathname.startsWith("/locations")) {
       return;
     }
     const bounds = map.getBounds();
+    // Restricts a coordinate to the legal map range.
+    // Inputs: value and inclusive minimum/maximum; output: the bounded value.
     const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
     const minLng = clamp(bounds.getWest(), -180, 180);
     const maxLng = clamp(bounds.getEast(), -180, 180);
@@ -591,6 +633,8 @@ function initialisePhotoMap() {
     map.fitBounds([[Number(element.dataset.minLng), Number(element.dataset.minLat)], [Number(element.dataset.maxLng), Number(element.dataset.maxLat)]], { padding: 20, maxZoom: 22 });
   }
 
+  // Replaces current map markers with points returned by the map API.
+  // Input: map-point records; output: none.
   function renderPoints(points) {
     markers.forEach((marker) => marker.remove());
     markers = points.map((point) => {
@@ -620,6 +664,8 @@ function initialisePhotoMap() {
           return;
         }
 
+        // Displays photos for a selected cluster and updates browser history.
+        // Inputs: photo records and the cluster URL; output: none.
         function showClusterPhotos(photos, clusterURL) {
           if (!clusterPhotosPanel || !clusterPhotosGrid) return;
           clusterPhotosGrid.replaceChildren();
@@ -685,6 +731,8 @@ function initialisePhotoMap() {
     });
   }
 
+  // Fetches or reuses cached cluster points for the current map viewport.
+  // Input: none; output: none.
   function loadPoints() {
     const bounds = map.getBounds();
     const params = new URLSearchParams({
@@ -727,10 +775,14 @@ if (document.readyState === "loading") {
 window.addEventListener("load", initialisePhotoMap);
 
 (() => {
+  // Initializes the responsive sidebar toggle when the page contains a sidebar.
+  // Input: none; output: none.
   const toggle = document.getElementById("sidebar-toggle");
   const sidebar = document.querySelector("main > aside");
   if (!toggle || !sidebar) { if (toggle) toggle.hidden = true; return; }
   sidebar.id = "sidebar";
+  // Applies the responsive sidebar's open state and accessibility attribute.
+  // Input: the desired open state; output: none.
   const setOpen = (open) => {
     document.body.classList.toggle("sidebar-open", open);
     toggle.setAttribute("aria-expanded", String(open));
@@ -741,8 +793,14 @@ window.addEventListener("load", initialisePhotoMap);
 
 // Touch gestures on a displayed photo reuse the keyboard handlers: swipe = previous/next, tap = select.
 (() => {
+  // Translates photo touch swipes and taps into the existing keyboard actions.
+  // Input: none; output: none.
   let start = null;
+  // Finds a displayed photo image from an event target, if present.
+  // Input: a DOM event target; output: the matching image element or null.
   const photoFrom = (target) => target.closest?.(".image-panel img, #photo-viewer img");
+  // Dispatches a keyboard event used by the photo navigation and selection handlers.
+  // Input: a key string; output: none.
   const press = (key) => document.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
   document.addEventListener("touchstart", (event) => {
     start = event.touches.length === 1 && photoFrom(event.target)

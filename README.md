@@ -29,6 +29,9 @@ thumbnail resizing. `THUMBNAIL_MAX_DIMENSION` controls the maximum thumbnail sid
 (default `640`).
 Set `LOG_LEVEL` to `debug`, `info` (default), `warn`, or `error` to control application
 log verbosity. Application logs are written to stdout.
+At `debug` level, SQL statements are logged with their source function and line,
+without their bound parameter values.
+`make dev` runs the application with debug logging enabled.
 
 Compose installs the default offline reverse-geocoding provider automatically on
 startup when the data is missing:
@@ -59,9 +62,9 @@ camera model, focal-length range, whether the flash fired, settlement, and regio
 Results use the same selection controls as the timeline and galleries, so they can
 be downloaded or added to a gallery. Existing photos need **Reindex all** after
 upgrading to populate the camera, focal-length, and flash fields.
-Selections are stored server-side per browser session, identified by an HTTP-only
-cookie. They remain available while navigating between views and are shown at
-`/selected`; use **Clear selection** to remove them.
+Selections are stored in the reserved selected gallery at `/selected` (gallery ID
+`0`) in SQLite, so they remain available across views and application restarts.
+Use **Clear selection** to remove them.
 
 Each image has a dedicated `/image/<id>` page. It shows metadata in the left panel
 and the full image in the main panel. Image links retain their source collection, so
@@ -111,7 +114,7 @@ npm run test:e2e
 
 TODO
 - saved as new collection
--- create collection called 'saved items' with id = 1. this cannot be deleted
+-- create collection called 'saved items' with id = 0. this cannot be deleted
 -- gallery template should get the saved value and set the checkbox to this value. can this be done in collect photos?
 -- changing the checkbox should add/remove to collection id 1
 -- unselect all should be 'remove from saved items' and remove all in gallery to collection id 1 (if we're viewing collection id 1 then we should refresh)

@@ -4,7 +4,7 @@
 
 help:
 	@printf '%s\n' \
-		'dev              Run the current Go source (set PHOTO_ROOT first)' \
+		'dev              Run the current Go source with debug logging' \
 		'test             Run unit and browser tests' \
 		'test-unit        Run Go unit tests' \
 		'test-browser     Set up fixtures and run Playwright tests' \
@@ -13,7 +13,7 @@ help:
 		'clean-test-data  Remove local browser-test data and photos'
 
 dev:
-	PHOTO_ROOT=./test-photos DATABASE_PATH=./test-data/fast-fotos.db go run ./cmd/fast-fotos
+	LOG_LEVEL=debug PHOTO_ROOT=./test-photos DATABASE_PATH=./test-data/fast-fotos.db go run ./cmd/fast-fotos
 
 test: test-unit test-browser
 

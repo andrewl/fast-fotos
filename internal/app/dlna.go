@@ -37,6 +37,8 @@ type dlnaDidl struct {
 	Items   []string `xml:"container|item"`
 }
 
+// startDLNADiscovery starts the server's background SSDP advertiser once.
+// Input: the server; output: none.
 func (s *Server) startDLNADiscovery() {
 	if s.dlnaCancel != nil {
 		return
@@ -46,6 +48,8 @@ func (s *Server) startDLNADiscovery() {
 	go s.runDLNAAdvertiser(ctx)
 }
 
+// dlnaAddress determines the LAN address and configured HTTP port advertised to DLNA clients.
+// Input: the server configuration; output: a host-and-port string.
 func (s *Server) dlnaAddress() string {
 	host := dlnaLocalAddress()
 	port := "8090"
@@ -55,6 +59,8 @@ func (s *Server) dlnaAddress() string {
 	return net.JoinHostPort(host, port)
 }
 
+// dlnaLocalAddress returns the first active non-loopback IPv4 address, falling back to localhost.
+// Input: none; output: an IPv4 address string.
 func dlnaLocalAddress() string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -78,6 +84,8 @@ func dlnaLocalAddress() string {
 	return "127.0.0.1"
 }
 
+// dlnaDescription serves the UPnP device description XML for this media server.
+// Inputs: an HTTP response writer and request; output: a device-description XML response.
 func (s *Server) dlnaDescription(w http.ResponseWriter, r *http.Request) {
 	address := s.dlnaAddress()
 	body := fmt.Sprintf(`<?xml version="1.0"?>
@@ -108,6 +116,8 @@ func (s *Server) dlnaDescription(w http.ResponseWriter, r *http.Request) {
 	_ = address
 }
 
+// dlnaContentDirectoryDescription serves the UPnP ContentDirectory service description XML.
+// Inputs: an HTTP response writer and request; output: a service-description XML response.
 func (s *Server) dlnaContentDirectoryDescription(w http.ResponseWriter, r *http.Request) {
 	body := `<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
@@ -143,6 +153,8 @@ func (s *Server) dlnaContentDirectoryDescription(w http.ResponseWriter, r *http.
 	_, _ = io.WriteString(w, body)
 }
 
+// runDLNAAdvertiser listens for SSDP discovery requests until ctx is cancelled.
+// Inputs: the server and lifecycle context; output: none.
 func (s *Server) runDLNAAdvertiser(ctx context.Context) {
 	conn, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900})
 	if err != nil {
@@ -168,6 +180,8 @@ func (s *Server) runDLNAAdvertiser(ctx context.Context) {
 	}
 }
 
+// runDLNAAnnouncements broadcasts periodic SSDP alive and shutdown announcements.
+// Inputs: the lifecycle context and UDP connection; output: none.
 func (s *Server) runDLNAAnnouncements(ctx context.Context, conn *net.UDPConn) {
 	s.sendDLNAAnnouncements(conn, "ssdp:alive")
 	ticker := time.NewTicker(30 * time.Second)
@@ -183,6 +197,8 @@ func (s *Server) runDLNAAnnouncements(ctx context.Context, conn *net.UDPConn) {
 	}
 }
 
+// sendDLNAMSearchResponse sends the media-server response to an SSDP M-SEARCH requester.
+// Inputs: a UDP connection and remote address; output: none.
 func (s *Server) sendDLNAMSearchResponse(conn *net.UDPConn, remote *net.UDPAddr) {
 	address := s.dlnaAddress()
 	location := "http://" + address + "/dlna/description.xml"
@@ -190,6 +206,8 @@ func (s *Server) sendDLNAMSearchResponse(conn *net.UDPConn, remote *net.UDPAddr)
 	_, _ = conn.WriteToUDP([]byte(response), remote)
 }
 
+// sendDLNAAnnouncements broadcasts the given SSDP notification type for supported device services.
+// Inputs: a UDP connection and notification subtype; output: none.
 func (s *Server) sendDLNAAnnouncements(conn *net.UDPConn, nts string) {
 	address := s.dlnaAddress()
 	location := "http://" + address + "/dlna/description.xml"
@@ -212,6 +230,8 @@ type dlnaBrowseRequest struct {
 	RequestedCount int    `xml:"RequestedCount"`
 }
 
+// dlnaControl parses a SOAP Browse request and returns matching ContentDirectory results.
+// Inputs: an HTTP response writer and SOAP request; output: a SOAP XML response or HTTP error.
 func (s *Server) dlnaControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -260,16 +280,22 @@ func (s *Server) dlnaControl(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, response)
 }
 
+// xmlEscape escapes text for safe inclusion in XML.
+// Input: unescaped text; output: its XML-escaped form.
 func xmlEscape(value string) string {
 	var escaped strings.Builder
 	_ = xml.EscapeText(&escaped, []byte(value))
 	return escaped.String()
 }
 
+// dlnaDIDLCount counts container and item elements in a DIDL-Lite document.
+// Input: DIDL-Lite XML; output: the number of matched elements.
 func dlnaDIDLCount(didl string) int {
 	return strings.Count(didl, "<container ") + strings.Count(didl, "<item ")
 }
 
+// dlnaBrowse returns DIDL-Lite metadata or paginated children for a ContentDirectory object.
+// Inputs: context, object ID, browse flag, start offset, and item limit; outputs: DIDL XML, total matches, or an error.
 func (s *Server) dlnaBrowse(ctx context.Context, objectID, browseFlag string, start, count int) (string, int, error) {
 	if strings.EqualFold(browseFlag, "BrowseMetadata") {
 		containers, err := s.dlnaContainers(ctx)
@@ -347,6 +373,8 @@ func (s *Server) dlnaBrowse(ctx context.Context, objectID, browseFlag string, st
 	return didl.String(), total, nil
 }
 
+// dlnaContainers builds the DLNA hierarchy from timeline months, saved searches, and galleries.
+// Input: a database context; outputs: available containers or an error.
 func (s *Server) dlnaContainers(ctx context.Context) ([]dlnaContainer, error) {
 	containers := []dlnaContainer{
 		{ID: "timeline", Title: "Timeline", Parent: "0"},
@@ -389,6 +417,8 @@ func (s *Server) dlnaContainers(ctx context.Context) ([]dlnaContainer, error) {
 	return containers, nil
 }
 
+// dlnaPhotosForContainer resolves a DLNA leaf object ID to its photo records.
+// Inputs: a database context and object ID; outputs: matching photos or an error.
 func (s *Server) dlnaPhotosForContainer(ctx context.Context, objectID string) ([]Photo, error) {
 	if objectID == "this-week" {
 		return s.photosForThisWeek(ctx)
@@ -438,16 +468,22 @@ func (s *Server) dlnaPhotosForContainer(ctx context.Context, objectID string) ([
 	return nil, nil
 }
 
+// dlnaContainerXML serializes one DLNA container as an XML element.
+// Input: a container record; output: its escaped XML representation.
 func dlnaContainerXML(container dlnaContainer) string {
 	return fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1" searchable="0"><dc:title>%s</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>`,
 		xmlEscape(container.ID), xmlEscape(container.Parent), xmlEscape(container.Title))
 }
 
+// dlnaContainerDIDL wraps one serialized container in a DIDL-Lite document.
+// Input: a container record; output: a complete DIDL-Lite XML document.
 func dlnaContainerDIDL(container dlnaContainer) string {
 	return `<?xml version="1.0" encoding="utf-8"?><DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">` +
 		dlnaContainerXML(container) + `</DIDL-Lite>`
 }
 
+// dlnaItemDIDL serializes a photo and its resource URLs as a DIDL-Lite item.
+// Inputs: the server, photo record, and parent container ID; output: the item XML.
 func dlnaItemDIDL(s *Server, photo Photo, parentID string) string {
 	address := s.dlnaAddress()
 	title := filepath.Base(photo.Path)
@@ -476,6 +512,8 @@ func dlnaItemDIDL(s *Server, photo Photo, parentID string) string {
 		photo.ID, xmlEscape(parentID), xmlEscape(title), xmlEscape(thumbnailURL), mime, xmlEscape(resourceURL))
 }
 
+// dlnaThumbnail serves a stored photo thumbnail to a DLNA client.
+// Inputs: an HTTP response writer and request containing the photo ID; output: JPEG data or HTTP not-found.
 func (s *Server) dlnaThumbnail(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/dlna/thumbnail/")
 	thumbnail, path, err := s.db.PhotoThumbnail(r.Context(), id)
@@ -493,6 +531,8 @@ func (s *Server) dlnaThumbnail(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(thumbnail)
 }
 
+// scaleDLNAImage converts oversized supported images to JPEG within 4K bounds.
+// Input: an image path; outputs: encoded bytes, MIME type, whether conversion occurred, or an error.
 func scaleDLNAImage(path string) ([]byte, string, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -532,6 +572,8 @@ func scaleDLNAImage(path string) ([]byte, string, bool, error) {
 	return output.Bytes(), "image/jpeg", true, nil
 }
 
+// dlnaResource safely serves an indexed source image or video, resizing oversized images for DLNA.
+// Inputs: an HTTP response writer and request containing the photo ID; output: source media or an HTTP error.
 func (s *Server) dlnaResource(w http.ResponseWriter, r *http.Request) {
 	idText := strings.TrimPrefix(r.URL.Path, "/dlna/resource/")
 	id, err := strconv.ParseInt(idText, 10, 64)

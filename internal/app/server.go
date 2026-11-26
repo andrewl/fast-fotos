@@ -314,13 +314,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /gallery/", s.galleryPage)
 	mux.HandleFunc("GET /galleries", s.galleryPage)
 	mux.HandleFunc("GET /galleries/", s.galleryPage)
+	mux.HandleFunc("GET /selected", s.selected)
+	mux.HandleFunc("GET /selected/", s.selected)
 	mux.HandleFunc("POST /gallery", s.addToGallery)
 	mux.HandleFunc("DELETE /gallery/", s.removeFromGallery)
 	mux.HandleFunc("DELETE /galleries/", s.deleteGallery)
 	mux.HandleFunc("POST /selection", s.selectPhotos)
 	mux.HandleFunc("DELETE /selection", s.unselectPhotos)
 	mux.HandleFunc("POST /selection/clear", s.clearSelection)
-	mux.HandleFunc("POST /galleries/1/remove", s.removeSelectedGalleryPhotos)
+	mux.HandleFunc("POST /galleries/0/remove", s.removeSelectedGalleryPhotos)
 	mux.HandleFunc("POST /saved-searches", s.saveSearch)
 	mux.HandleFunc("DELETE /saved-searches/", s.deleteSavedSearch)
 	mux.HandleFunc("GET /similar/", s.similarCollection)
@@ -336,6 +338,46 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /raw/", s.rawFile)
 	mux.HandleFunc("GET /download/", s.download)
 	return mux
+}
+
+// selected renders the selection, its photo details, or its map.
+// Inputs: an HTTP response writer and request; output: HTML or an HTTP error.
+func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
+	collectionPath, photoID, hasPhoto, mapView, ok := splitCollectionPhotoMapPath(r.URL.Path)
+	if !ok || collectionPath != "/selected" {
+		http.NotFound(w, r)
+		return
+	}
+	photos, err := s.db.PhotosForCollection(r.Context(), SelectedCollectionID)
+	if err != nil {
+		slog.Error("Failed to load selected photos", "error", err)
+		http.Error(w, "Could not load selected photos", http.StatusInternalServerError)
+		return
+	}
+	if mapView {
+		if hasPhoto {
+			filtered := make([]Photo, 0, 1)
+			for _, photo := range photos {
+				if photo.ID == photoID {
+					filtered = append(filtered, photo)
+					break
+				}
+			}
+			photos = filtered
+		}
+		s.renderCollectionMap(w, r, "/selected", photos)
+		return
+	}
+	if hasPhoto {
+		s.renderCollectionPhoto(w, r, photoID, "/selected", "Selected photos", photos)
+		return
+	}
+	galleries, err := s.db.Collections(r.Context())
+	if err != nil {
+		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "gallery-full", PageData{Page: "selected", Photos: photos, Collections: galleries, ReturnURL: "/selected"})
 }
 
 // mustSub returns an embedded sub-filesystem or panics on error.
@@ -429,6 +471,8 @@ func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "home", PageData{Page: "home", Months: months, Photos: photos, SelectedMonth: month, PhotoRoot: s.config.PhotoRoot, ReturnURL: r.URL.Path})
 }
 
+// parseSearchCollectionCriteria decodes path-encoded search filters into query values.
+// Input: comma-separated or URL-encoded criteria; outputs: parsed filters or an error.
 func parseSearchCollectionCriteria(criteria string) (url.Values, error) {
 	decoded, err := url.PathUnescape(criteria)
 	if err != nil {
@@ -458,6 +502,8 @@ func parseSearchCollectionCriteria(criteria string) (url.Values, error) {
 	return query, nil
 }
 
+// parseLocationsCollectionCriteria decodes path-encoded location filters into query values.
+// Input: comma-separated or URL-encoded criteria; outputs: parsed filters or an error.
 func parseLocationsCollectionCriteria(criteria string) (url.Values, error) {
 	decoded, err := url.PathUnescape(criteria)
 	if err != nil {
@@ -481,6 +527,8 @@ func parseLocationsCollectionCriteria(criteria string) (url.Values, error) {
 	return query, nil
 }
 
+// canonicalLocationsURL serializes supported location filters into a stable locations path.
+// Input: location query values; output: a canonical /locations URL.
 func canonicalLocationsURL(query url.Values) string {
 	keys := []string{"place", "settlement", "region", "minLat", "minLng", "maxLat", "maxLng", "mapLat", "mapLng", "mapZoom", "photoId", "photoIds"}
 	parts := make([]string, 0, len(keys))
@@ -496,6 +544,8 @@ func canonicalLocationsURL(query url.Values) string {
 	return "/locations/" + strings.Join(parts, ",")
 }
 
+// canonicalSearchURL serializes supported search filters into a stable search path.
+// Input: search query values; output: a canonical /search URL.
 func canonicalSearchURL(query url.Values) string {
 	keys := []string{"from", "to", "label", "color", "camera", "focal", "flash", "location"}
 	parts := make([]string, 0, len(keys))
@@ -771,11 +821,14 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 		slog.Info("Loading map cluster", "query", galleryURL.Query())
 		photos, err := s.clusterPhotos(ctx, galleryURL.Query())
 		return galleryURL.RequestURI(), "Map cluster", photos, err
+	case galleryURL.Path == "/selected":
+		photos, err := s.db.PhotosForCollection(ctx, SelectedCollectionID)
+		return "/selected", "Selected photos", photos, err
 	case strings.HasPrefix(galleryURL.Path, "/galleries/"):
 		slog.Info("Loading collection", "collectionId", galleryURL.Path)
 		galleryPath := strings.TrimPrefix(galleryURL.Path, "/galleries/")
 		collectionID, err := strconv.ParseInt(galleryPath, 10, 64)
-		if err != nil || collectionID < 1 {
+		if err != nil || collectionID < 0 {
 			slog.Error("Invalid collection ID", "collectionId", galleryURL.Path, "error", err)
 			return "", "", nil, errors.New("invalid collection")
 		}
@@ -857,6 +910,8 @@ func splitCollectionPhotoMapPath(path string) (collectionPath string, photoID in
 	return "", 0, false, false, false
 }
 
+// mapURLForPhoto returns a photo map URL when the photo has valid coordinates.
+// Input: a photo record; output: its map path or an empty string when it is ungeotagged.
 func mapURLForPhoto(photo Photo) string {
 	if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
 		return ""
@@ -864,6 +919,8 @@ func mapURLForPhoto(photo Photo) string {
 	return fmt.Sprintf("/photo/%d/map", photo.ID)
 }
 
+// mapURLForCollectionPhoto builds a map path that preserves the photo's collection context.
+// Inputs: a collection return URL and photo record; output: a map path or an empty string.
 func mapURLForCollectionPhoto(returnURL string, photo Photo) string {
 	if photo.Latitude == nil || photo.Longitude == nil || (*photo.Latitude == 0 && *photo.Longitude == 0) {
 		return ""
@@ -877,6 +934,8 @@ func mapURLForCollectionPhoto(returnURL string, photo Photo) string {
 	return mapURLForPhoto(photo)
 }
 
+// photoInCollection reports whether a photo ID occurs in a collection's photo list.
+// Inputs: photo records and an ID; output: whether the ID is present.
 func photoInCollection(photos []Photo, id int64) bool {
 	for _, photo := range photos {
 		if photo.ID == id {
@@ -1418,6 +1477,8 @@ func parseOptionalFloat(value string) (float64, bool) {
 	return parsed, err == nil
 }
 
+// clusterBounds validates and extracts the latitude and longitude bounds in query.
+// Input: map query values; outputs: minimum/maximum coordinates in latitude-longitude order or an error.
 func clusterBounds(query url.Values) (float64, float64, float64, float64, error) {
 	minLatitude, err := strconv.ParseFloat(query.Get("minLat"), 64)
 	if err != nil || minLatitude < -90 || minLatitude > 90 {
@@ -1469,10 +1530,21 @@ func (s *Server) galleryPage(w http.ResponseWriter, r *http.Request) {
 		prefix = "/gallery/"
 	}
 	id, err := strconv.ParseInt(strings.TrimPrefix(collectionPath, prefix), 10, 64)
-	if err != nil || id < 1 {
+	if err != nil || id < 0 {
 		slog.Error("Invalid collection ID", "error", err)
 		slog.Info("Redirecting to first collection", "collectionID", collections[0].ID)
 		http.Redirect(w, r, fmt.Sprintf("/galleries/%d", collections[0].ID), http.StatusSeeOther)
+		return
+	}
+	if id == SelectedCollectionID {
+		target := "/selected"
+		if hasPhoto {
+			target += fmt.Sprintf("/photo/%d", photoID)
+		}
+		if mapView {
+			target += "/map"
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
 	collection, err := s.db.CollectionByID(r.Context(), id)
@@ -1688,14 +1760,22 @@ func (s *Server) addToGallery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No selected photos could be added to the gallery", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/galleries/%d", galleryID))
+	redirect := fmt.Sprintf("/galleries/%d", galleryID)
+	if galleryID == SelectedCollectionID {
+		redirect = "/selected"
+	}
+	w.Header().Set("HX-Redirect", redirect)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// removeFromCollection preserves the legacy endpoint handler by forwarding to removeFromGallery.
+// Inputs: the HTTP response writer and request; output: the gallery-removal HTTP response.
 func (s *Server) removeFromCollection(w http.ResponseWriter, r *http.Request) {
 	s.removeFromGallery(w, r)
 }
 
+// removeFromGallery removes submitted photo IDs from the selected gallery.
+// Inputs: the HTTP response writer and a request containing gallery_id and ids; output: an HTTP status/redirect response.
 func (s *Server) removeFromGallery(w http.ResponseWriter, r *http.Request) {
 	ids := r.FormValue("ids")
 	if ids == "" {
@@ -1725,7 +1805,11 @@ func (s *Server) removeFromGallery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not remove photos from gallery", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("HX-Redirect", fmt.Sprintf("/galleries/%d", galleryID))
+	redirect := fmt.Sprintf("/galleries/%d", galleryID)
+	if galleryID == SelectedCollectionID {
+		redirect = "/selected"
+	}
+	w.Header().Set("HX-Redirect", redirect)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1734,6 +1818,8 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 	s.deleteGallery(w, r)
 }
 
+// deleteGallery deletes the gallery identified by the request path unless it is protected.
+// Inputs: the HTTP response writer and request; output: an HTTP status and redirect response.
 func (s *Server) deleteGallery(w http.ResponseWriter, r *http.Request) {
 	collectionID := strings.TrimPrefix(r.URL.Path, "/galleries/")
 	collectionID = strings.TrimPrefix(collectionID, "/")
@@ -1766,6 +1852,8 @@ func (s *Server) unselectPhotos(w http.ResponseWriter, r *http.Request) {
 	s.changeSelection(w, r, s.db.UnselectPhotos)
 }
 
+// changeSelection parses submitted photo IDs and applies the supplied selection update.
+// Inputs: response writer, request, and database update callback; output: an HTTP status response.
 func (s *Server) changeSelection(w http.ResponseWriter, r *http.Request, change func(context.Context, []int64) error) {
 	ids := strings.TrimSpace(r.FormValue("ids"))
 	if ids == "" {
@@ -1806,6 +1894,8 @@ func (s *Server) removeSelectedGalleryPhotos(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// clearSelection removes every photo from the current user's persisted selection.
+// Inputs: the HTTP response writer and request; output: an HTTP status response.
 func (s *Server) clearSelection(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.ClearSelection(r.Context()); err != nil {
 		slog.Error("Failed to clear selection", "error", err)
@@ -1871,7 +1961,7 @@ func (s *Server) deleteSavedSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) selectCollection(ctx context.Context, existingID, name string) (int64, error) {
 	if existingID != "" {
 		id, err := strconv.ParseInt(existingID, 10, 64)
-		if err != nil || id < 1 {
+		if err != nil || id < 0 {
 			slog.Error("Invalid collection ID provided", "collection_id", existingID, "error", err)
 			return 0, fmt.Errorf("invalid collection")
 		}
@@ -2018,6 +2108,8 @@ func (s *Server) currentIndexProgress() IndexProgress {
 	return progress
 }
 
+// updateDetectionProgress stores object-detection counts and their computed percentage.
+// Inputs: processed and total photo counts; output: none.
 func (s *Server) updateDetectionProgress(processed, total int) {
 	s.detectMu.Lock()
 	s.detectProgress.Processed = processed
@@ -2222,6 +2314,8 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 	return selectWeeklyPhotos(photos, 10), nil
 }
 
+// selectWeeklyPhotos chooses a limited set of photos while favoring golden-hour shots and new detected subjects.
+// Inputs: candidate photos and a maximum count; output: the chosen photos in selection order.
 func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 	if limit <= 0 || len(photos) == 0 {
 		return nil
@@ -2276,6 +2370,13 @@ func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 // render executes a named HTML template with PageData context and writes the output response.
 func (s *Server) render(w http.ResponseWriter, name string, data PageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	galleries := make([]Collection, 0, len(data.Collections))
+	for _, gallery := range data.Collections {
+		if gallery.ID != SelectedCollectionID {
+			galleries = append(galleries, gallery)
+		}
+	}
+	data.Collections = galleries
 	if data.Selected == nil {
 		selected, err := s.db.SelectedPhotoIDs(context.Background())
 		if err != nil {
