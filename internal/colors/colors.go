@@ -82,11 +82,22 @@ func labDistance(c1, c2 Lab) float64 {
 	return math.Sqrt(dL*dL + dA*dA + dB*dB)
 }
 
+const (
+	// greyMaxChroma is the highest LAB chroma (sqrt(a²+b²)) a cluster may have to be called Grey.
+	greyMaxChroma = 8.0
+	// greyMinCoverage is the minimum share of sampled pixels a cluster needs to be called Grey.
+	greyMinCoverage = 0.4
+)
+
 // labToColorName maps a LAB color coordinate to the nearest reference named color.
-func labToColorName(l Lab) string {
-	closestName := referenceColors[0].name
-	minDist := labDistance(l, referenceColors[0].lab)
-	for i := 1; i < len(referenceColors); i++ {
+// Grey is only a candidate when allowGrey is true, since muted colors otherwise fall to it too often.
+func labToColorName(l Lab, allowGrey bool) string {
+	closestName := ""
+	minDist := math.Inf(1)
+	for i := 0; i < len(referenceColors); i++ {
+		if !allowGrey && referenceColors[i].name == "Grey" {
+			continue
+		}
 		dist := labDistance(l, referenceColors[i].lab)
 		if dist < minDist {
 			minDist = dist
@@ -214,7 +225,9 @@ func ExtractDominantColorsFromImage(img image.Image, k int) []string {
 		if cl.count < threshold && len(result) > 0 {
 			continue
 		}
-		name := labToColorName(cl.centroid)
+		chroma := math.Hypot(cl.centroid.A, cl.centroid.B)
+		allowGrey := chroma < greyMaxChroma && float64(cl.count)/float64(len(points)) >= greyMinCoverage
+		name := labToColorName(cl.centroid, allowGrey)
 		if !seen[name] {
 			seen[name] = true
 			result = append(result, name)
