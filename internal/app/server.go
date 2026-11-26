@@ -378,7 +378,7 @@ func (s *Server) selected(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not load galleries", http.StatusInternalServerError)
 		return
 	}
-	s.render(w, "gallery-full", PageData{Page: "selected", Photos: photos, Collections: galleries, ReturnURL: "/selected"})
+	s.render(w, "selected", PageData{Page: "selected", Photos: photos, Collections: galleries, ReturnURL: "/selected"})
 }
 
 // mustSub returns an embedded sub-filesystem or panics on error.
@@ -2447,6 +2447,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"gallery":      {"templates/gallery.html"},
 		"collections":  {"templates/base.html", "templates/collections.html"},
 		"collection":   {"templates/base.html", "templates/collection.html", "templates/gallery.html"},
+		"selected":     {"templates/base.html", "templates/selected.html", "templates/gallery.html"},
 		"gallery-full": {"templates/base.html", "templates/gallery_full.html", "templates/gallery.html"},
 		"locations":    {"templates/base.html", "templates/locations.html"},
 		"cluster":      {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},

@@ -1,16 +1,14 @@
 {{define "selected"}}{{template "base" .}}{{end}}
 {{define "content"}}
-<aside>
-  <h2>Selected Photos</h2>
-  <div>
-          <button type="button" id="add-to-gallery-action">Add to gallery</button>
-          <button type="button" hx-get="/download?raw=true" hx-swap="download">Download with raw files</button>
-          <button type="button" hx-get="/download?raw=false" hx-swap="download">Download without raw files</button>
-          <button type="button" hx-get="/csv" hx-swap="download">Export CSV</button>
-          <button type="button" hx-get="/clear-selected" hx-swap="none" id="clear-selection">Clear selection</button>
-    </div>
+<aside class="selection-sidebar">
+  <h2>Selected photos</h2>
+  <p>{{len .Photos}} selected</p>
+  <div class="sidebar-actions">
+    <button type="button" id="add-selection-to-gallery" data-requires-selection command="show-modal" commandfor="add-to-gallery-dialog" disabled>Add selected to gallery</button>
+    <button type="button" id="download-with-raw" data-requires-selection data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" disabled>Download selected with raw files</button>
+    <button type="button" id="download-without-raw" data-requires-selection data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" disabled>Download selected without raw files</button>
+    <button type="button" id="clear-selection-all" onclick="clearSelection()">Clear all selected</button>
+  </div>
 </aside>
-<section id="gallery">
-  {{template "gallery-content" .}}
-</section>
+<section id="gallery">{{template "gallery-content" .}}</section>
 {{end}}

@@ -3,21 +3,13 @@ document.body.addEventListener('htmx:configRequest', function(evt) {
     console.log(evt);
 });
 
-// Updates action-menu button availability from the current checkbox state.
+// Enables the selection-dependent buttons only while at least one photo is checked.
 // Input: none; output: none (updates the page).
 function updateActionMenu() {
   const selectedCount = document.querySelectorAll("[data-photo-selection]:checked").length;
-  const actionMenu = document.querySelector(".action-menu-panel");
-  if (!actionMenu) return;
-  if (selectedCount === 0) {
-    actionMenu.querySelectorAll("button:not(#select-all):not(#unselect-all):not(#clear-selection-all)").forEach((button) => {
-      button.disabled = true;
-    });
-  } else {
-    actionMenu.querySelectorAll("button").forEach((button) => {
-      button.disabled = false;
-    });
-  }
+  document.querySelectorAll("[data-requires-selection]").forEach((button) => {
+    button.disabled = selectedCount === 0;
+  });
 }
 
 

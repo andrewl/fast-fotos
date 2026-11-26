@@ -10,10 +10,6 @@
         <div class="action-menu-panel">
           <button onClick="selectAll()" id="select-all">Select all on page</button>
           <button onClick="selectNone()" id="unselect-all">Unselect all on page</button>
-          <button onClick="clearSelection()" id="clear-selection-all">Clear all selected</button>
-          <button type="button" id="add-selection-to-gallery" class="btn btn-light p-1" command="show-modal" commandfor="add-to-gallery-dialog">Add Selected To Gallery</button>
-          <button type="button" data-append-photo-ids hx-get="/download?raw=true" hx-swap="download" id="download-with-raw" disabled>Download selected with raw files</button>
-          <button type="button" data-append-photo-ids hx-get="/download?raw=false" hx-swap="download" id="download-without-raw" disabled>Download selected without raw files</button>
         </div>
       </details>
     </div>

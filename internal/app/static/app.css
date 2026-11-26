@@ -13,3 +13,4 @@
 .gallery-shortcuts li.in-gallery::after { color: #d9f16b; content: " ✓"; } .collection-shortcuts li.in-collection::after { color: #d9f16b; content: " ✓"; } .image-panel.zoomed { overflow: hidden; } .image-panel img { transition: transform .1s; } body.sidebar-hidden #sidebar { display: none !important; } body.sidebar-hidden main { grid-template-columns: 1fr; }
 .page-thisweek main, .page-gallery main { grid-template-columns: 1fr; }
 .page-thisweek .sidebar-toggle, .page-gallery .sidebar-toggle { display: none; }
+.sidebar-actions { display: grid; gap: .5rem; } .sidebar-actions button { text-align: left; }
