@@ -848,3 +848,22 @@ func TestDeleteCollectionKeepsSelected(t *testing.T) {
 		t.Fatalf("collections = %+v, %v; want only the selected collection", collections, err)
 	}
 }
+
+func TestSelectWeeklyPhotosPrefersPeopleAnimalsAndQuality(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	base := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	photos := []Photo{
+		{ID: 1, TakenAt: base, Objects: []string{"chair"}, Sharpness: f(250), Exposure: f(0.5), Contrast: f(0.7), Brisque: f(20)},
+		{ID: 2, TakenAt: base.Add(time.Hour), Objects: []string{"person"}, Sharpness: f(250), Exposure: f(0.5), Contrast: f(0.7), Brisque: f(20)},
+		{ID: 3, TakenAt: base.Add(2 * time.Hour), Objects: []string{"dog"}, Sharpness: f(250), Exposure: f(0.5), Contrast: f(0.7), Brisque: f(20)},
+		{ID: 4, TakenAt: base.Add(3 * time.Hour), Objects: []string{"person"}, Sharpness: f(5), Exposure: f(0.5), Contrast: f(0.7), Brisque: f(20)},
+	}
+	got := selectWeeklyPhotos(photos, 2)
+	if len(got) != 2 || got[0].ID != 2 || got[1].ID != 3 {
+		t.Fatalf("selected %+v, want photos 2 and 3 in time order", got)
+	}
+	// Poor photos are still used when needed to fill the limit.
+	if all := selectWeeklyPhotos(photos, 10); len(all) != 4 {
+		t.Fatalf("selected %d photos, want 4", len(all))
+	}
+}

@@ -106,6 +106,10 @@ type Photo struct {
 	DurationSeconds *float64
 	DayOfYear       int
 	GoldenHour      bool
+	Sharpness       *float64
+	Exposure        *float64
+	Contrast        *float64
+	Brisque         *float64
 }
 
 // IsVideo reports whether the photo record represents a video file rather than a still image.
@@ -2342,11 +2346,52 @@ func (s *Server) photosForThisWeek(ctx context.Context) ([]Photo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return selectWeeklyPhotos(photos, 10), nil
+	return selectWeeklyPhotos(photos, weeklyPhotoLimit), nil
 }
 
-// selectWeeklyPhotos chooses a limited set of photos while favoring golden-hour shots and new detected subjects.
-// Inputs: candidate photos and a maximum count; output: the chosen photos in selection order.
+// weeklyPhotoLimit is the maximum number of photos in the this-week collection.
+const weeklyPhotoLimit = 100
+
+var weeklyAnimals = map[string]bool{
+	"bird": true, "cat": true, "dog": true, "horse": true, "sheep": true,
+	"cow": true, "elephant": true, "bear": true, "zebra": true, "giraffe": true,
+}
+
+// weeklyQuality returns a 0-1 technical quality estimate from whichever scores exist (0.5 if none).
+func weeklyQuality(p Photo) float64 {
+	sum, n := 0.0, 0
+	if p.Sharpness != nil {
+		sum += math.Min(1, math.Log1p(math.Max(0, *p.Sharpness))/math.Log1p(300))
+		n++
+	}
+	if p.Exposure != nil {
+		sum += math.Max(0, 1-math.Abs(*p.Exposure-0.5)*2)
+		n++
+	}
+	if p.Contrast != nil {
+		sum += math.Min(1, math.Max(0, *p.Contrast))
+		n++
+	}
+	if p.Brisque != nil {
+		sum += math.Min(1, math.Max(0, (100-*p.Brisque)/100))
+		n++
+	}
+	if n == 0 {
+		return 0.5
+	}
+	return sum / float64(n)
+}
+
+// weeklyPoorQuality reports whether a photo is clearly blurry, badly exposed or low quality.
+func weeklyPoorQuality(p Photo) bool {
+	return qualityBandName("sharpness_score", p.Sharpness) == "blurry" ||
+		qualityBandName("exposure_score", p.Exposure) != "" && qualityBandName("exposure_score", p.Exposure) != "good" ||
+		qualityBandName("brisque_score", p.Brisque) == "poor"
+}
+
+// selectWeeklyPhotos chooses up to limit photos, favoring people and animals, technical quality,
+// golden-hour shots and subject variety. Clearly poor photos are dropped while enough others remain.
+// Inputs: candidate photos and a maximum count; output: the chosen photos in chronological order.
 func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 	if limit <= 0 || len(photos) == 0 {
 		return nil
@@ -2358,26 +2403,52 @@ func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 		}
 		return candidates[i].TakenAt.Before(candidates[j].TakenAt)
 	})
+	good := make([]Photo, 0, len(candidates))
+	for _, photo := range candidates {
+		if !weeklyPoorQuality(photo) {
+			good = append(good, photo)
+		}
+	}
+	if len(good) >= limit {
+		candidates = good
+	}
 
 	selected := make([]Photo, 0, min(limit, len(candidates)))
 	used := make([]bool, len(candidates))
 	subjects := make(map[string]bool)
 	for len(selected) < limit && len(selected) < len(candidates) {
-		bestIndex, bestScore := -1, -1.0
+		bestIndex, bestScore := -1, math.Inf(-1)
 		for i, photo := range candidates {
 			if used[i] {
 				continue
 			}
-			score := 0.0
+			score := 2 * weeklyQuality(photo)
 			if photo.GoldenHour {
 				score += 0.5
 			}
 			seenInPhoto := make(map[string]bool)
 			for _, subject := range photo.Objects {
 				subject = strings.ToLower(strings.TrimSpace(subject))
-				if subject != "" && !subjects[subject] && !seenInPhoto[subject] {
+				if subject == "" || seenInPhoto[subject] {
+					continue
+				}
+				seenInPhoto[subject] = true
+				switch {
+				case subject == "person" && subjects[subject]:
+					score += 1.5
+				case subject == "person":
+					score += 3
+				case weeklyAnimals[subject] && subjects[subject]:
+					score += 1
+				case weeklyAnimals[subject]:
+					score += 2
+				case !subjects[subject]:
 					score++
-					seenInPhoto[subject] = true
+				}
+			}
+			for _, other := range selected {
+				if d := photo.TakenAt.Sub(other.TakenAt); d < 5*time.Minute && d > -5*time.Minute {
+					score -= 0.5
 				}
 			}
 			if score > bestScore {
@@ -2395,6 +2466,12 @@ func selectWeeklyPhotos(photos []Photo, limit int) []Photo {
 			}
 		}
 	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].TakenAt.Equal(selected[j].TakenAt) {
+			return selected[i].ID < selected[j].ID
+		}
+		return selected[i].TakenAt.Before(selected[j].TakenAt)
+	})
 	return selected
 }
 
@@ -2435,6 +2512,8 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"photoTakenAt":     photoTakenAt,
 		"photoFocalLength": photoFocalLength,
 		"photoFlash":       photoFlash,
+		"qualityBand":      qualityBandName,
+		"deref":            func(v *float64) float64 { return *v },
 		"imagePath":        imagePath,
 		"join":             strings.Join,
 		"urlquery":         url.QueryEscape,

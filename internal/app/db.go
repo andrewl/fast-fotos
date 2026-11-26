@@ -405,7 +405,8 @@ func scanPhoto(row rowScanner, extra ...any) (Photo, error) {
 	var photo Photo
 	var takenAt, objects, colors string
 	dest := append([]any{&photo.ID, &photo.Path, &photo.RawPath, &takenAt, &photo.Latitude, &photo.Longitude,
-		&photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &objects, &colors}, extra...)
+		&photo.Location, &photo.CameraModel, &photo.FocalLength, &photo.FlashFired, &objects, &colors,
+		&photo.Sharpness, &photo.Exposure, &photo.Contrast, &photo.Brisque}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return Photo{}, err
 	}
@@ -423,7 +424,8 @@ func scanPhoto(row rowScanner, extra ...any) (Photo, error) {
 }
 
 const photoColumns = `id, path, COALESCE(raw_path, ''), taken_at, latitude, longitude, COALESCE(location, ''),
-	camera_model, focal_length, flash_fired, objects, dominant_colors`
+	camera_model, focal_length, flash_fired, objects, dominant_colors,
+	sharpness_score, exposure_score, contrast_score, brisque_score`
 
 // queryPhotos executes a parameterized photo query and scans every result row.
 // Inputs: a context, SQL query, and query arguments; outputs: matching photos or an error.
@@ -750,6 +752,19 @@ var qualityBands = map[string]map[string]qualityBand{
 	"exposure_score":  {"under": {math.Inf(-1), 0.3}, "good": {0.3, 0.7}, "over": {0.7, math.Inf(1)}},
 	"contrast_score":  {"low": {math.Inf(-1), 0.4}, "medium": {0.4, 0.7}, "high": {0.7, math.Inf(1)}},
 	"brisque_score":   {"good": {math.Inf(-1), 30}, "fair": {30, 50}, "poor": {50, math.Inf(1)}},
+}
+
+// qualityBandName returns the band label for a score, or "" when the score is missing or unbanded.
+func qualityBandName(column string, value *float64) string {
+	if value == nil {
+		return ""
+	}
+	for name, band := range qualityBands[column] {
+		if *value >= band.Min && *value < band.Max {
+			return name
+		}
+	}
+	return ""
 }
 
 // validQualityBand reports whether value is empty or a known band for the score column.
@@ -1287,7 +1302,7 @@ func (d *DB) DeleteSavedSearch(ctx context.Context, id int64) error {
 
 // PhotosForCollection returns photos in a collection.
 func (d *DB) PhotosForCollection(ctx context.Context, collectionID int64) ([]Photo, error) {
-	photos, err := d.queryPhotos(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors FROM photos p
+	photos, err := d.queryPhotos(ctx, `SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude, COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired, p.objects, p.dominant_colors, p.sharpness_score, p.exposure_score, p.contrast_score, p.brisque_score FROM photos p
 		JOIN collection_photos gp ON gp.photo_id = p.id WHERE gp.collection_id = ? ORDER BY p.taken_at ASC`, collectionID)
 	if err != nil {
 		slog.Error("Error querying photos for collection: ", "err", err)
@@ -1335,7 +1350,7 @@ func (d *DB) SimilarPhotos(ctx context.Context, targetID int64, limit int) ([]Ph
 		)
 		SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude,
 			COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired,
-			p.objects, p.dominant_colors
+			p.objects, p.dominant_colors, p.sharpness_score, p.exposure_score, p.contrast_score, p.brisque_score
 		FROM ranked JOIN photos p ON p.id = ranked.id
 		ORDER BY (ranked.tag_matches * 10 + ranked.color_matches) DESC,
 			p.taken_at ASC, p.id ASC
@@ -1370,7 +1385,7 @@ func (d *DB) NearPhotos(ctx context.Context, targetID int64, limit int) ([]Photo
 		)
 		SELECT p.id, p.path, COALESCE(p.raw_path, ''), p.taken_at, p.latitude, p.longitude,
 			COALESCE(p.location, ''), p.camera_model, p.focal_length, p.flash_fired,
-			p.objects, p.dominant_colors
+			p.objects, p.dominant_colors, p.sharpness_score, p.exposure_score, p.contrast_score, p.brisque_score
 		FROM ranked JOIN photos p ON p.id = ranked.id
 		ORDER BY ranked.distance_metres ASC, p.taken_at ASC, p.id ASC
 		LIMIT ?`,

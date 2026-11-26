@@ -15,6 +15,10 @@
     {{if .Photo.FocalLength}}<dt>Focal length</dt><dd>{{photoFocalLength .Photo.FocalLength}}</dd>{{end}}
     {{if .Photo.FlashFired}}<dt>Flash</dt><dd>{{photoFlash .Photo.FlashFired}}</dd>{{end}}
     {{if .Photo.Objects}}<dt>Labels</dt><dd>{{join .Photo.Objects ", "}}</dd>{{end}}
+    {{with .Photo.Sharpness}}<dt>Sharpness</dt><dd>{{printf "%.0f" (deref .)}} ({{qualityBand "sharpness_score" .}})</dd>{{end}}
+    {{with .Photo.Exposure}}<dt>Exposure</dt><dd>{{printf "%.2f" (deref .)}} ({{qualityBand "exposure_score" .}})</dd>{{end}}
+    {{with .Photo.Contrast}}<dt>Contrast</dt><dd>{{printf "%.2f" (deref .)}} ({{qualityBand "contrast_score" .}})</dd>{{end}}
+    {{with .Photo.Brisque}}<dt>BRISQUE</dt><dd>{{printf "%.0f" (deref .)}} ({{qualityBand "brisque_score" .}})</dd>{{end}}
     {{if .Photo.DominantColors}}<dt>Dominant colors</dt><dd>{{join .Photo.DominantColors ", "}}</dd>{{end}}
   </dl>
   <h2>Shortcuts</h2>
