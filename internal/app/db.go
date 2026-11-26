@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrewl/fast-fotos/internal/quality"
 	_ "modernc.org/sqlite"
 )
 
@@ -146,6 +147,14 @@ func (d *DB) migrate(ctx context.Context) error {
 	}
 	if err := d.addColumnIfMissing(ctx, "photos", "objects_detected_at", "TEXT"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"sharpness_score", "REAL"}, {"exposure_score", "REAL"}, {"contrast_score", "REAL"},
+		{"brisque_score", "REAL"}, {"quality_assessed_at", "TEXT"},
+	} {
+		if err := d.addColumnIfMissing(ctx, "photos", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	if err := d.addColumnIfMissing(ctx, "photos", "x", "REAL"); err != nil {
 		return err
@@ -555,7 +564,7 @@ func (d *DB) UpsertPhoto(ctx context.Context, p PhotoRecord) error {
 			settlement = excluded.settlement, region = excluded.region, country = excluded.country,
 			camera_model = excluded.camera_model, focal_length = excluded.focal_length,
 			flash_fired = excluded.flash_fired, dominant_colors = excluded.dominant_colors,
-			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL, objects_detected_at = NULL`,
+			media_type = excluded.media_type, duration_seconds = excluded.duration_seconds, indexed_at = excluded.indexed_at, day_of_year = excluded.day_of_year, golden_hour = NULL, objects_detected_at = NULL, quality_assessed_at = NULL`,
 		p.Path, p.RawPath, formatTime(p.TakenAt), p.Latitude, p.Longitude, x, y, thumbnail, p.Location, p.LocationSource,
 		p.Settlement, p.Region, p.Country, p.CameraModel, p.FocalLength, p.FlashFired,
 		encodeStrings(p.DominantColors), p.MediaType, p.DurationSeconds,
@@ -608,6 +617,44 @@ func (d *DB) NextPendingDetections(ctx context.Context, afterID int64, limit int
 func (d *DB) SetDetectedObjects(ctx context.Context, id int64, labels []string) error {
 	_, err := d.sql.ExecContext(ctx, `UPDATE photos SET objects = ?, objects_detected_at = ? WHERE id = ?`,
 		encodeStrings(labels), formatTime(time.Now().UTC()), id)
+	return err
+}
+
+// PendingQualityCount returns the number of photos awaiting quality assessment.
+func (d *DB) PendingQualityCount(ctx context.Context) (int, error) {
+	var count int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM photos WHERE quality_assessed_at IS NULL`).Scan(&count)
+	return count, err
+}
+
+// NextPendingQuality returns up to limit photos with id > afterID whose quality assessment has not run.
+func (d *DB) NextPendingQuality(ctx context.Context, afterID int64, limit int) ([]PendingDetection, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT id, path, thumbnail FROM photos
+		WHERE quality_assessed_at IS NULL AND id > ? ORDER BY id LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingDetection
+	for rows.Next() {
+		var p PendingDetection
+		if err := rows.Scan(&p.ID, &p.Path, &p.Thumbnail); err != nil {
+			return nil, err
+		}
+		pending = append(pending, p)
+	}
+	return pending, rows.Err()
+}
+
+// SetQualityMetrics stores quality scores (nil clears them) and marks assessment as done for a photo.
+func (d *DB) SetQualityMetrics(ctx context.Context, id int64, m *quality.Metrics) error {
+	var sharpness, exposure, contrast, brisque any
+	if m != nil {
+		sharpness, exposure, contrast, brisque = m.Sharpness, m.Exposure, m.Contrast, m.Brisque
+	}
+	_, err := d.sql.ExecContext(ctx, `UPDATE photos SET sharpness_score = ?, exposure_score = ?, contrast_score = ?,
+		brisque_score = ?, quality_assessed_at = ? WHERE id = ?`,
+		sharpness, exposure, contrast, brisque, formatTime(time.Now().UTC()), id)
 	return err
 }
 
@@ -693,9 +740,30 @@ func (d *DB) SearchLocations(ctx context.Context) ([]SearchLocation, error) {
 	return locations, rows.Err()
 }
 
+// qualityBand is a half-open [Min, Max) range of a quality score.
+type qualityBand struct{ Min, Max float64 }
+
+// qualityBands maps search filter names to the score ranges they select.
+// Thresholds are tuned for scores computed from 640px thumbnails.
+var qualityBands = map[string]map[string]qualityBand{
+	"sharpness_score": {"blurry": {math.Inf(-1), 50}, "soft": {50, 150}, "sharp": {150, math.Inf(1)}},
+	"exposure_score":  {"under": {math.Inf(-1), 0.3}, "good": {0.3, 0.7}, "over": {0.7, math.Inf(1)}},
+	"contrast_score":  {"low": {math.Inf(-1), 0.4}, "medium": {0.4, 0.7}, "high": {0.7, math.Inf(1)}},
+	"brisque_score":   {"good": {math.Inf(-1), 30}, "fair": {30, 50}, "poor": {50, math.Inf(1)}},
+}
+
+// validQualityBand reports whether value is empty or a known band for the score column.
+func validQualityBand(column, value string) bool {
+	if value == "" {
+		return true
+	}
+	_, ok := qualityBands[column][value]
+	return ok
+}
+
 // SearchPhotos queries photos using the filters in SearchData.
 func (d *DB) SearchPhotos(ctx context.Context, search SearchData) ([]Photo, error) {
-	return d.queryPhotos(ctx, `SELECT `+photoColumns+`
+	query := `SELECT ` + photoColumns + `
 		FROM photos
 		WHERE (?1 = '' OR taken_at >= ?1)
 		AND (?2 = '' OR taken_at < date(?2, '+1 day'))
@@ -705,10 +773,31 @@ func (d *DB) SearchPhotos(ctx context.Context, search SearchData) ([]Photo, erro
 		AND (?6 = '' OR (?6 = 'yes' AND flash_fired = 1) OR (?6 = 'no' AND flash_fired = 0))
 		AND (?7 = '' OR settlement = ?7)
 		AND (?8 = '' OR region = ?8)
-		AND (?9 = '' OR EXISTS (SELECT 1 FROM json_each(photos.dominant_colors) WHERE value = ?9))
-		ORDER BY taken_at ASC, id ASC`,
-		search.DateFrom, search.DateTo, search.Label, search.CameraModel,
-		search.FocalLength, search.Flash, search.Settlement, search.Region, search.Color)
+		AND (?9 = '' OR EXISTS (SELECT 1 FROM json_each(photos.dominant_colors) WHERE value = ?9))`
+	args := []any{search.DateFrom, search.DateTo, search.Label, search.CameraModel,
+		search.FocalLength, search.Flash, search.Settlement, search.Region, search.Color}
+	for _, filter := range []struct{ column, value string }{
+		{"sharpness_score", search.Sharpness}, {"exposure_score", search.Exposure},
+		{"contrast_score", search.Contrast}, {"brisque_score", search.Quality},
+	} {
+		if filter.value == "" {
+			continue
+		}
+		band, ok := qualityBands[filter.column][filter.value]
+		if !ok {
+			return nil, fmt.Errorf("unknown %s band %q", filter.column, filter.value)
+		}
+		query += fmt.Sprintf(" AND %s IS NOT NULL", filter.column)
+		if !math.IsInf(band.Min, -1) {
+			query += fmt.Sprintf(" AND %s >= ?", filter.column)
+			args = append(args, band.Min)
+		}
+		if !math.IsInf(band.Max, 1) {
+			query += fmt.Sprintf(" AND %s < ?", filter.column)
+			args = append(args, band.Max)
+		}
+	}
+	return d.queryPhotos(ctx, query+" ORDER BY taken_at ASC, id ASC", args...)
 }
 
 // LocationGroups returns all settlement and region names with photo counts.

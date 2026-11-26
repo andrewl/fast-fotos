@@ -134,7 +134,7 @@ clients using the same database. It is omitted from gallery lists and available 
 | `GET /maintenance` | None | Indexing controls and progress page |
 | `GET /timeline/{YYYY}/{MM}` or `GET /timeline/{YYYY-MM}` | Month in path; optional `/photo/{id}` or `/map` suffix | Timeline HTML, photo detail, or collection map |
 | `GET /months/{YYYY-MM}` | Month in path | Timeline HTML partial for HTMX |
-| `GET /search[/{criteria}]` | Optional filters `from`, `to`, `label`, `color`, `camera`, `focal`, `flash`, and `location`; criteria may be query parameters or comma-separated path pairs | Search HTML; path filters use the same names |
+| `GET /search[/{criteria}]` | Optional filters `from`, `to`, `label`, `color`, `camera`, `focal`, `flash`, `location`, `sharpness` (`sharp|soft|blurry`), `exposure` (`good|under|over`), `contrast` (`high|medium|low`), and `quality` (`good|fair|poor`); criteria may be query parameters or comma-separated path pairs | Search HTML; path filters use the same names |
 | `GET /this-week` | Optional `/photo/{id}` or `/map` suffix | This-week gallery HTML, photo detail, or map |
 | `GET /locations[/{criteria}]` | Optional `place`, `settlement`, `region`, bounds (`minLat`, `minLng`, `maxLat`, `maxLng`), map center/zoom, or photo ID filters | Interactive map page; invalid bounds return `400` |
 | `GET /cluster` | Bounds `minLat`, `maxLat`, `minLng`, `maxLng`; optional `map` return URL or `photoId` | HTML photo grid for the cluster |

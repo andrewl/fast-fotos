@@ -58,7 +58,10 @@ installations outside Docker.
 ## Searching photos
 
 The **Search** view can filter photos by capture date range, detected object label,
-camera model, focal-length range, whether the flash fired, settlement, and region.
+camera model, focal-length range, whether the flash fired, settlement, region, and
+image-quality bands: sharpness (Laplacian variance), exposure and contrast
+(histogram), and overall quality (BRISQUE). Quality scores are computed in the
+background after indexing, so new photos become searchable by them shortly after.
 Results use the same selection controls as the timeline and galleries, so they can
 be downloaded or added to a gallery. Existing photos need **Reindex all** after
 upgrading to populate the camera, focal-length, and flash fields.

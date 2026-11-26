@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/andrewl/fast-fotos/internal/colors"
+	"github.com/andrewl/fast-fotos/internal/quality"
 	"github.com/rwcarlsen/goexif/exif"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -428,6 +429,59 @@ func resizeFilter(name string) (draw.Interpolator, error) {
 		return draw.CatmullRom, nil
 	default:
 		return nil, fmt.Errorf("unknown resize filter %q", name)
+	}
+}
+
+// assessQuality computes quality metrics for photos not yet assessed, until none remain or ctx is cancelled.
+func (s *Server) assessQuality(ctx context.Context) {
+	total, err := s.db.PendingQualityCount(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("count photos pending quality assessment", "error", err)
+		}
+		return
+	}
+	s.updateQualityProgress(0, total)
+	var afterID int64
+	assessed := 0
+	for {
+		batch, err := s.db.NextPendingQuality(ctx, afterID, 50)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("list photos pending quality assessment", "error", err)
+			}
+			return
+		}
+		if len(batch) == 0 {
+			if assessed > 0 {
+				slog.Info("quality assessment finished", "count", assessed)
+			}
+			return
+		}
+		for _, p := range batch {
+			if ctx.Err() != nil {
+				slog.Info("quality assessment interrupted", "count", assessed)
+				return
+			}
+			afterID = p.ID
+			var metrics *quality.Metrics
+			if len(p.Thumbnail) > 0 {
+				m, err := quality.Analyze(p.Thumbnail)
+				if err != nil {
+					slog.Warn("quality assessment failed", "path", p.Path, "error", err)
+				} else {
+					metrics = &m
+				}
+			}
+			if err := s.db.SetQualityMetrics(ctx, p.ID, metrics); err != nil {
+				if ctx.Err() == nil {
+					slog.Error("save quality metrics", "path", p.Path, "error", err)
+				}
+				return
+			}
+			assessed++
+			s.updateQualityProgress(assessed, total)
+		}
 	}
 }
 

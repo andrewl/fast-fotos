@@ -169,6 +169,7 @@ type SearchData struct {
 	Labels                                                                    []string
 	FocalLengths                                                              []string
 	Colors                                                                    []string
+	Sharpness, Exposure, Contrast, Quality                                    string
 	Settlement                                                                string
 	Region                                                                    string
 }
@@ -230,11 +231,8 @@ func NewServer(ctx context.Context, config Config) (*Server, error) {
 	return server, nil
 }
 
-// startDetection launches background object detection unless it is already running, indexing is active, or no detector is loaded.
+// startDetection launches background object detection and quality assessment unless already running or indexing is active.
 func (s *Server) startDetection() {
-	if s.detector == nil {
-		return
-	}
 	s.indexProgressMu.RLock()
 	indexing := s.indexCancel != nil
 	s.indexProgressMu.RUnlock()
@@ -246,10 +244,13 @@ func (s *Server) startDetection() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s.detectCancel, s.detectDone = cancel, done
-	s.detectProgress = DetectionProgress{Active: true, Message: "Object detection: preparing photos..."}
+	s.detectProgress = DetectionProgress{Active: true, Message: "Analysing photos: preparing..."}
 	go func() {
 		defer close(done)
-		s.detectObjects(ctx)
+		if s.detector != nil {
+			s.detectObjects(ctx)
+		}
+		s.assessQuality(ctx)
 		s.detectMu.Lock()
 		if s.detectDone == done {
 			s.detectCancel, s.detectDone = nil, nil
@@ -547,7 +548,7 @@ func canonicalLocationsURL(query url.Values) string {
 // canonicalSearchURL serializes supported search filters into a stable search path.
 // Input: search query values; output: a canonical /search URL.
 func canonicalSearchURL(query url.Values) string {
-	keys := []string{"from", "to", "label", "color", "camera", "focal", "flash", "location"}
+	keys := []string{"from", "to", "label", "color", "camera", "focal", "flash", "location", "sharpness", "exposure", "contrast", "quality"}
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
 		value := strings.TrimSpace(query.Get(key))
@@ -589,6 +590,11 @@ func searchTitle(query url.Values) string {
 			labels = append(labels, "flash not fired")
 		}
 	}
+	for _, key := range []string{"sharpness", "exposure", "contrast", "quality"} {
+		if value := strings.TrimSpace(query.Get(key)); value != "" {
+			labels = append(labels, key+" "+value)
+		}
+	}
 	if value := strings.TrimSpace(query.Get("location")); value != "" {
 		value = strings.TrimPrefix(value, "settlement:")
 		value = strings.TrimPrefix(value, "region:")
@@ -625,7 +631,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		for _, key := range []string{"from", "to", "label", "color", "camera", "focal", "flash", "location"} {
+		for _, key := range []string{"from", "to", "label", "color", "camera", "focal", "flash", "location", "sharpness", "exposure", "contrast", "quality"} {
 			if parsedQuery.Get(key) == "" && r.URL.Query().Get(key) != "" {
 				parsedQuery.Set(key, r.URL.Query().Get(key))
 			}
@@ -636,6 +642,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		DateFrom: query.Get("from"), DateTo: query.Get("to"), Label: query.Get("label"),
 		CameraModel: query.Get("camera"), FocalLength: query.Get("focal"), Flash: query.Get("flash"),
 		Location: query.Get("location"), Color: query.Get("color"),
+		Sharpness: query.Get("sharpness"), Exposure: query.Get("exposure"), Contrast: query.Get("contrast"), Quality: query.Get("quality"),
 	}
 
 	if strings.HasPrefix(search.Location, "settlement:") {
@@ -670,11 +677,23 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for column, value := range map[string]string{
+		"sharpness_score": search.Sharpness, "exposure_score": search.Exposure,
+		"contrast_score": search.Contrast, "brisque_score": search.Quality,
+	} {
+		if !validQualityBand(column, value) {
+			http.Error(w, "Invalid quality filter", http.StatusBadRequest)
+			return
+		}
+	}
+
 	collectionQuery := url.Values{}
 	for key, value := range map[string]string{
 		"from": search.DateFrom, "to": search.DateTo, "label": search.Label,
 		"color": search.Color, "camera": search.CameraModel, "focal": search.FocalLength,
 		"flash": search.Flash, "location": search.Location,
+		"sharpness": search.Sharpness, "exposure": search.Exposure,
+		"contrast": search.Contrast, "quality": search.Quality,
 	} {
 		if value != "" {
 			collectionQuery.Set(key, value)
@@ -686,7 +705,8 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 	photos := []Photo{}
 	//we must have at lease one search criteria to avoid returning the entire photo library
-	if search.DateFrom == "" && search.DateTo == "" && search.Label == "" && search.CameraModel == "" && search.FocalLength == "" && search.Flash == "" && search.Location == "" && search.Color == "" {
+	if search.DateFrom == "" && search.DateTo == "" && search.Label == "" && search.CameraModel == "" && search.FocalLength == "" && search.Flash == "" && search.Location == "" && search.Color == "" &&
+		search.Sharpness == "" && search.Exposure == "" && search.Contrast == "" && search.Quality == "" {
 		slog.Info("No search criteria provided")
 	} else {
 		var err error
@@ -856,6 +876,7 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 			DateFrom: query.Get("from"), DateTo: query.Get("to"), Label: query.Get("label"),
 			CameraModel: query.Get("camera"), FocalLength: query.Get("focal"), Flash: query.Get("flash"),
 			Location: query.Get("location"), Color: query.Get("color"),
+			Sharpness: query.Get("sharpness"), Exposure: query.Get("exposure"), Contrast: query.Get("contrast"), Quality: query.Get("quality"),
 		}
 		if strings.HasPrefix(search.Location, "settlement:") {
 			search.Settlement = strings.TrimPrefix(search.Location, "settlement:")
@@ -2116,6 +2137,16 @@ func (s *Server) updateDetectionProgress(processed, total int) {
 	s.detectProgress.Total = total
 	s.detectProgress.Percentage = percentage(processed, total)
 	s.detectProgress.Message = "Object detection in progress..."
+	s.detectMu.Unlock()
+}
+
+// updateQualityProgress stores quality-assessment counts and their computed percentage.
+func (s *Server) updateQualityProgress(processed, total int) {
+	s.detectMu.Lock()
+	s.detectProgress.Processed = processed
+	s.detectProgress.Total = total
+	s.detectProgress.Percentage = percentage(processed, total)
+	s.detectProgress.Message = "Quality assessment in progress..."
 	s.detectMu.Unlock()
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/andrewl/fast-fotos/internal/quality"
 	"log/slog"
 	"math"
 	"path/filepath"
@@ -429,6 +430,18 @@ func TestDBRoundTrip(t *testing.T) {
 	}
 	if got, err := db.SearchPhotos(ctx, SearchData{Label: "cat", DateFrom: "2024-03-05", DateTo: "2024-03-05", FocalLength: "50", Flash: "yes", Color: "red"}); err != nil || len(got) != 1 {
 		t.Fatalf("search: %+v %v", got, err)
+	}
+	if err := db.SetQualityMetrics(ctx, 1, &quality.Metrics{Sharpness: 200, Exposure: 0.5, Contrast: 0.8, Brisque: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetQualityMetrics(ctx, 2, &quality.Metrics{Sharpness: 10, Exposure: 0.1, Contrast: 0.2, Brisque: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.SearchPhotos(ctx, SearchData{Sharpness: "sharp", Exposure: "good", Contrast: "high", Quality: "good"}); err != nil || len(got) != 1 || got[0].ID != 1 {
+		t.Fatalf("quality search: %+v %v", got, err)
+	}
+	if got, err := db.SearchPhotos(ctx, SearchData{Sharpness: "blurry", Exposure: "under"}); err != nil || len(got) != 1 || got[0].ID != 2 {
+		t.Fatalf("quality search 2: %+v %v", got, err)
 	}
 	if labels, err := db.Labels(ctx); err != nil || len(labels) != 1 {
 		t.Fatalf("labels: %v %v", labels, err)

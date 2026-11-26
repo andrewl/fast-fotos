@@ -35,6 +35,18 @@
       <label>Location
         <select name="location"><option value="">Any location</option>{{range .Search.Locations}}<option value="{{.Value}}"{{if eq .Value $.Search.Location}} selected{{end}}>{{.Label}}</option>{{end}}</select>
       </label>
+      <label>Sharpness
+        <select name="sharpness"><option value="">Any</option><option value="sharp"{{if eq .Search.Sharpness "sharp"}} selected{{end}}>Sharp</option><option value="soft"{{if eq .Search.Sharpness "soft"}} selected{{end}}>Soft</option><option value="blurry"{{if eq .Search.Sharpness "blurry"}} selected{{end}}>Blurry</option></select>
+      </label>
+      <label>Exposure
+        <select name="exposure"><option value="">Any</option><option value="good"{{if eq .Search.Exposure "good"}} selected{{end}}>Well exposed</option><option value="under"{{if eq .Search.Exposure "under"}} selected{{end}}>Underexposed</option><option value="over"{{if eq .Search.Exposure "over"}} selected{{end}}>Overexposed</option></select>
+      </label>
+      <label>Contrast
+        <select name="contrast"><option value="">Any</option><option value="high"{{if eq .Search.Contrast "high"}} selected{{end}}>High</option><option value="medium"{{if eq .Search.Contrast "medium"}} selected{{end}}>Medium</option><option value="low"{{if eq .Search.Contrast "low"}} selected{{end}}>Low</option></select>
+      </label>
+      <label>Quality
+        <select name="quality"><option value="">Any</option><option value="good"{{if eq .Search.Quality "good"}} selected{{end}}>Good</option><option value="fair"{{if eq .Search.Quality "fair"}} selected{{end}}>Fair</option><option value="poor"{{if eq .Search.Quality "poor"}} selected{{end}}>Poor</option></select>
+      </label>
       <div class="search-actions">
         <button type="submit">Search</button>
         {{if ne .ReturnURL "/search"}}<button type="button" id="save-search" hx-post="/saved-searches" hx-vals='{"url":"{{.ReturnURL}}"}' hx-swap="none">Save search</button>{{end}}
