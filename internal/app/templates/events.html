@@ -1,0 +1,33 @@
+{{define "events"}}{{template "base" .}}{{end}}
+{{define "content"}}
+<section id="gallery">
+  {{if .Event}}
+  <p><a href="/events">Back to events</a></p>
+  <p>{{.Event.DateRange}} · {{.Event.Count}} photos{{if .Event.Hidden}} · Hidden{{end}} · <a href="/events/{{.Event.ID}}/map">View on map</a></p>
+  <details class="event-editor">
+    <summary>Edit event name</summary>
+    <form method="post" action="/events/{{.Event.ID}}/name">
+      <label>Event name <input name="name" value="{{.Event.Name}}" maxlength="200"></label>
+      <button type="submit">Save name</button>
+      <small>Leave blank to use the automatic name.</small>
+    </form>
+  </details>
+  <form method="post" action="/events/{{.Event.ID}}/{{if .Event.Hidden}}restore{{else}}hide{{end}}">
+    <button type="submit">{{if .Event.Hidden}}Restore event{{else}}Hide event{{end}}</button>
+  </form>
+  {{template "gallery-content" .}}
+  {{else}}
+  <h1>{{if .ShowHiddenEvents}}Hidden events{{else}}Events{{end}}</h1>
+  <p>{{if .ShowHiddenEvents}}<a href="/events">View events</a>{{else}}<a href="/events?hidden=1">View hidden events</a>{{end}}</p>
+  <div class="event-grid">
+    {{range .Events}}
+    <a class="event-card" href="/events/{{.ID}}">
+      <img src="/thumbnails/{{.CoverID}}" alt="" loading="lazy">
+      <strong>{{.Name}}</strong>
+      <span>{{.DateRange}} · {{.Count}} photos</span>
+    </a>
+    {{else}}<p>No events found.</p>{{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}

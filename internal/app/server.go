@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andrewl/fast-fotos/internal/geocode"
 	"github.com/andrewl/fast-fotos/internal/objects"
@@ -126,9 +127,10 @@ type Month struct {
 
 // Gallery represents a user-created gallery.
 type Gallery struct {
-	ID    int64
-	Name  string
-	Count int
+	ID          int64
+	Name        string
+	Description string
+	Count       int
 }
 
 // Collection is kept for source compatibility; new code should use Gallery.
@@ -164,6 +166,9 @@ type PageData struct {
 	OtherCollections   []Collection
 	PhotoCollections   map[int64]bool
 	Selected           map[int64]bool
+	Events             []Event
+	Event              *Event
+	ShowHiddenEvents   bool
 }
 
 // SearchData holds filter parameters and dropdown values for photo search options.
@@ -252,6 +257,9 @@ func (s *Server) startDetection() {
 	s.detectProgress = DetectionProgress{Active: true, Message: "Analysing photos: preparing..."}
 	go func() {
 		defer close(done)
+		if err := s.db.RebuildEvents(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("rebuild events", "error", err)
+		}
 		if s.detector != nil {
 			s.detectObjects(ctx)
 		}
@@ -312,6 +320,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /months/", s.month)
 	mux.HandleFunc("GET /this-week/", s.thisweek)
 	mux.HandleFunc("GET /this-week", s.thisweek)
+	mux.HandleFunc("GET /events", s.eventsPage)
+	mux.HandleFunc("GET /events/", s.eventsPage)
+	mux.HandleFunc("POST /events/{id}/name", s.updateEventName)
+	mux.HandleFunc("POST /events/{id}/hide", s.setEventHidden)
+	mux.HandleFunc("POST /events/{id}/restore", s.setEventHidden)
 	mux.HandleFunc("GET /locations", s.locations)
 	mux.HandleFunc("GET /locations/", s.locations)
 	mux.HandleFunc("GET /cluster", s.cluster)
@@ -320,6 +333,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /gallery/", s.galleryPage)
 	mux.HandleFunc("GET /galleries", s.galleryPage)
 	mux.HandleFunc("GET /galleries/", s.galleryPage)
+	mux.HandleFunc("POST /galleries/{id}/description", s.updateGalleryDescription)
 	mux.HandleFunc("GET /selected", s.selected)
 	mux.HandleFunc("GET /selected/", s.selected)
 	mux.HandleFunc("POST /gallery", s.addToGallery)
@@ -850,6 +864,17 @@ func (s *Server) imageGalleryContextPhotos(ctx context.Context, from, selectionT
 	case galleryURL.Path == "/selected":
 		photos, err := s.db.PhotosForCollection(ctx, SelectedCollectionID)
 		return "/selected", "Selected photos", photos, err
+	case strings.HasPrefix(galleryURL.Path, "/events/"):
+		id, err := strconv.ParseInt(strings.TrimPrefix(galleryURL.Path, "/events/"), 10, 64)
+		if err != nil || id < 1 {
+			return "", "", nil, errors.New("invalid event")
+		}
+		event, err := s.db.EventByID(ctx, id)
+		if err != nil {
+			return "", "", nil, err
+		}
+		photos, err := s.db.PhotosForEvent(ctx, id)
+		return galleryURL.Path, event.Name, photos, err
 	case strings.HasPrefix(galleryURL.Path, "/galleries/"):
 		slog.Info("Loading collection", "collectionId", galleryURL.Path)
 		galleryPath := strings.TrimPrefix(galleryURL.Path, "/galleries/")
@@ -1524,6 +1549,35 @@ func clusterBounds(query url.Values) (float64, float64, float64, float64, error)
 		return 0, 0, 0, 0, errors.New("invalid cluster maximum longitude")
 	}
 	return minLatitude, maxLatitude, minLongitude, maxLongitude, nil
+}
+
+// updateGalleryDescription saves the optional text displayed on a gallery page.
+func (s *Server) updateGalleryDescription(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid gallery text", http.StatusBadRequest)
+		return
+	}
+	values, ok := r.PostForm["description"]
+	if !ok || len(values) != 1 || !utf8.ValidString(values[0]) || utf8.RuneCountInString(values[0]) > 10000 {
+		http.Error(w, "Invalid gallery text", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.UpdateGalleryDescription(r.Context(), id, values[0]); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+		} else {
+			slog.Error("Failed to update gallery text", "gallery_id", id, "error", err)
+			http.Error(w, "Could not save gallery text", http.StatusInternalServerError)
+		}
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/galleries/%d", id), http.StatusSeeOther)
 }
 
 // galleryPage renders a user-created gallery and optional photo detail.
@@ -2696,6 +2750,7 @@ func parseTemplates() (map[string]*template.Template, error) {
 		"locations":    {"templates/base.html", "templates/locations.html"},
 		"cluster":      {"templates/base.html", "templates/cluster.html", "templates/gallery.html"},
 		"thisweek":     {"templates/base.html", "templates/thisweek.html", "templates/gallery.html"},
+		"events":       {"templates/base.html", "templates/events.html", "templates/gallery.html"},
 	}
 	templates := make(map[string]*template.Template, len(pages))
 	for name, files := range pages {

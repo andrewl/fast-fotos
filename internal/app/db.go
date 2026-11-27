@@ -117,11 +117,23 @@ func (d *DB) migrate(ctx context.Context) error {
 		)`, `CREATE TABLE IF NOT EXISTS collections (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT UNIQUE NOT NULL CHECK (length(trim(name)) > 0),
+			description TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f000', 'now'))
 		)`, `CREATE TABLE IF NOT EXISTS collection_photos (
 			collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
 			photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
 			PRIMARY KEY (collection_id, photo_id)
+		)`, `CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			auto_name TEXT NOT NULL,
+			custom_name TEXT NOT NULL DEFAULT '',
+			hidden INTEGER NOT NULL DEFAULT 0,
+			start_at TEXT NOT NULL,
+			end_at TEXT NOT NULL
+		)`, `CREATE TABLE IF NOT EXISTS event_photos (
+			event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+			photo_id INTEGER NOT NULL UNIQUE REFERENCES photos(id) ON DELETE CASCADE,
+			PRIMARY KEY (event_id, photo_id)
 		)`, `CREATE TABLE IF NOT EXISTS saved_searches (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			url TEXT NOT NULL UNIQUE CHECK (length(trim(url)) > 0),
@@ -141,6 +153,9 @@ func (d *DB) migrate(ctx context.Context) error {
 	}
 	if err := d.migrateSelectedCollection(ctx); err != nil {
 		return fmt.Errorf("migrate selected collection: %w", err)
+	}
+	if err := d.addColumnIfMissing(ctx, "collections", "description", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	if err := d.addColumnIfMissing(ctx, "photos", "golden_hour", "INTEGER"); err != nil {
 		return err
@@ -1176,7 +1191,7 @@ func (d *DB) PhotoFilePaths(ctx context.Context, ids []int64) ([]PhotoFilePath, 
 
 // Collections returns all collections with photo counts.
 func (d *DB) Collections(ctx context.Context) ([]Collection, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)
+	rows, err := d.sql.QueryContext(ctx, `SELECT g.id, g.name, g.description, COUNT(gp.photo_id)
 		FROM collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
 		GROUP BY g.id ORDER BY g.name ASC`)
 	if err != nil {
@@ -1187,7 +1202,7 @@ func (d *DB) Collections(ctx context.Context) ([]Collection, error) {
 	var collections []Collection
 	for rows.Next() {
 		var collection Collection
-		if err := rows.Scan(&collection.ID, &collection.Name, &collection.Count); err != nil {
+		if err := rows.Scan(&collection.ID, &collection.Name, &collection.Description, &collection.Count); err != nil {
 			return nil, err
 		}
 		collections = append(collections, collection)
@@ -1221,10 +1236,27 @@ func (d *DB) CollectionIDsForPhoto(ctx context.Context, photoID int64) (map[int6
 // CollectionByID returns one collection with its photo count.
 func (d *DB) CollectionByID(ctx context.Context, id int64) (Collection, error) {
 	var collection Collection
-	err := d.sql.QueryRowContext(ctx, `SELECT g.id, g.name, COUNT(gp.photo_id)
+	err := d.sql.QueryRowContext(ctx, `SELECT g.id, g.name, g.description, COUNT(gp.photo_id)
 		FROM collections g LEFT JOIN collection_photos gp ON gp.collection_id = g.id
-		WHERE g.id = ? GROUP BY g.id`, id).Scan(&collection.ID, &collection.Name, &collection.Count)
+		WHERE g.id = ? GROUP BY g.id`, id).Scan(&collection.ID, &collection.Name, &collection.Description, &collection.Count)
 	return collection, err
+}
+
+// UpdateGalleryDescription updates an existing user gallery's text.
+func (d *DB) UpdateGalleryDescription(ctx context.Context, id int64, description string) error {
+	result, err := d.sql.ExecContext(ctx, `UPDATE collections SET description = ? WHERE id = ? AND id <> ?`,
+		description, id, SelectedCollectionID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // GalleryByID loads a gallery with compatibility for the previous collection API.

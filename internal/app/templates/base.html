@@ -9,7 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0/dist/ext/hx-download.js"></script>
   {{if eq .Page "locations"}}<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"><script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>{{end}}
   <link rel="stylesheet" href="/static/app.css">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=search,map,photo_library,build,calendar_month,check_box,delete,today" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&icon_names=search,map,photo_library,build,calendar_month,check_box,delete,today,event" />
 </head>
 <body class="page-{{.Page}}">
   <header>
@@ -17,6 +17,7 @@
     <nav aria-label="Primary navigation">
       <a href="/h" title="Timeline"><span aria-hidden="true" class="material-symbols-outlined">calendar_month</span><span class="sr-only">Timeline</span></a>
       <a href="/this-week" title="This week"><span aria-hidden="true" class="material-symbols-outlined">today</span><span class="sr-only">This week</span></a>
+      <a href="/events" title="Events"><span aria-hidden="true" class="material-symbols-outlined">event</span><span class="sr-only">Events</span></a>
       <a href="/search" title="Search"><span aria-hidden="true" class="material-symbols-outlined">search</span><span class="sr-only">Search</span></a>
       <a href="/locations" title="Map"><span aria-hidden="true" class="material-symbols-outlined">map</span><span class="sr-only">Map</span></a>
       <a href="/galleries" title="Galleries"><span aria-hidden="true" class="material-symbols-outlined">photo_library</span><span class="sr-only">Galleries</span></a>

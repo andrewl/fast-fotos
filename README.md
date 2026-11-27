@@ -94,6 +94,14 @@ processed (it is interrupted whenever indexing starts and resumes afterwards) an
 After enabling GeoNames for an existing database, run **Reindex all** once so
 previously indexed photos are processed and receive their locations.
 
+**Events** groups photos by capture time and measured GPS location after indexing
+and on startup. A group needs at least three photos, stays within 50 km of its
+first GPS location and splits after a 48-hour gap or 14 days. Photos without
+reliable GPS join only when their capture time falls inside an unambiguous group.
+Names use the predominant town, region or country when available. You can rename
+or hide an event and restore it from the hidden-events list. Grouping is heuristic:
+long trips may be split and ordinary photos may be grouped together.
+
 The timeline groups photos by capture month, the map page shows clustered geotagged
 photos on OpenStreetMap, and
 custom galleries keep pointers to selected images without moving them from the source

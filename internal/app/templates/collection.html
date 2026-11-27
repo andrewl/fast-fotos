@@ -14,5 +14,19 @@
   <p><a href="/galleries/{{.Collection.ID}}/download?raw=true&amp;processed=true" download>Download processed with raw files</a></p>
   {{end}}
 </aside>
-<section id="gallery">{{template "gallery-content" .}}</section>
+<section id="gallery">
+  {{with .Collection}}
+  {{if .Description}}<div class="gallery-description">{{.Description}}</div>{{end}}
+  <details class="gallery-description-editor">
+    <summary>Edit gallery text</summary>
+    <form method="post" action="/galleries/{{.ID}}/description">
+      <label for="gallery-description">Gallery text</label>
+      <textarea id="gallery-description" name="description" rows="5" maxlength="10000">
+{{.Description}}</textarea>
+      <button type="submit">Save text</button>
+    </form>
+  </details>
+  {{end}}
+  {{template "gallery-content" .}}
+</section>
 {{end}}
