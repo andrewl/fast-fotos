@@ -7,6 +7,12 @@
   {{else}}
   <p>No galleries yet.</p>
   {{end}}
+  {{if and .Collection .Photos}}
+  <h2>Download</h2>
+  <p><a href="/galleries/{{.Collection.ID}}/download?raw=true" download>Download with raw files</a></p>
+  <p><a href="/galleries/{{.Collection.ID}}/download?raw=false" download>Download without raw files</a></p>
+  <p><a href="/galleries/{{.Collection.ID}}/download?raw=true&amp;processed=true" download>Download processed with raw files</a></p>
+  {{end}}
 </aside>
 <section id="gallery">{{template "gallery-content" .}}</section>
 {{end}}

@@ -867,3 +867,56 @@ func TestSelectWeeklyPhotosPrefersPeopleAnimalsAndQuality(t *testing.T) {
 		t.Fatalf("selected %d photos, want 4", len(all))
 	}
 }
+
+func TestDownloadGalleryZipIncludesRawFiles(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for name, contents := range map[string]string{"a.jpg": "image", "a.RW2": "raw", "b.jpg": "image2"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := OpenDB(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Now().UTC()
+	for _, p := range []PhotoRecord{{Path: "a.jpg", RawPath: "a.RW2"}, {Path: "b.jpg"}} {
+		p.TakenAt, p.IndexedAt, p.MediaType = now, now, "photo"
+		if err := db.UpsertPhoto(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, err := db.CreateGallery(ctx, "My trip/2024")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddPhotosToGallery(ctx, id, []int64{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db, config: Config{PhotoRoot: root}}
+	server.templates, err = parseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := server.Routes()
+	defer server.dlnaCancel()
+
+	for raw, want := range map[string]int{"true": 3, "false": 2} {
+		response := httptest.NewRecorder()
+		routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/galleries/"+strconv.FormatInt(id, 10)+"/download?raw="+raw, nil))
+		if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Disposition"), "fast-fotos-My-trip-2024.zip") {
+			t.Fatalf("raw=%s: status %d header %q", raw, response.Code, response.Header().Get("Content-Disposition"))
+		}
+		archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+		if err != nil || len(archive.File) != want {
+			t.Fatalf("raw=%s: %d files, %v; want %d", raw, len(archive.File), err, want)
+		}
+	}
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/galleries/999/download", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing gallery status = %d", response.Code)
+	}
+}

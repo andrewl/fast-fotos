@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -342,6 +343,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /photos/", s.photoFile)
 	mux.HandleFunc("GET /raw/", s.rawFile)
 	mux.HandleFunc("GET /download/", s.download)
+	mux.HandleFunc("GET /galleries/{id}/download", s.downloadGallery)
 	return mux
 }
 
@@ -2237,28 +2239,132 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//if the query string contains raw=true, include the raw files in the zip archive
-	includeRaw := r.URL.Query().Get("raw") == "true"
+	filename := fmt.Sprintf("fast-fotos-selection-%s.zip", time.Now().Format("2006-01-02-150405"))
+	s.writeZip(w, r, photoIDs, filename)
+}
 
-	//get the path and rawpath of all the photos in the collection
+// downloadGallery streams a zip of every photo in a gallery, adding raw files when raw=true.
+// Inputs: a /galleries/{id}/download request; output: a zip attachment or an HTTP error.
+func (s *Server) downloadGallery(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 0 {
+		http.NotFound(w, r)
+		return
+	}
+	name := "selected"
+	if id != SelectedCollectionID {
+		collection, err := s.db.CollectionByID(r.Context(), id)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		name = collection.Name
+	}
+	photos, err := s.db.PhotosForCollection(r.Context(), id)
+	if err != nil {
+		http.Error(w, "Could not load gallery", http.StatusInternalServerError)
+		return
+	}
+	if len(photos) == 0 {
+		http.Error(w, "Gallery has no photos", http.StatusNotFound)
+		return
+	}
+	ids := make([]int64, len(photos))
+	for i, photo := range photos {
+		ids[i] = photo.ID
+	}
+	s.writeZip(w, r, ids, "fast-fotos-"+safeFilename(name)+".zip")
+}
+
+// safeFilename reduces a name to characters that are safe in a Content-Disposition filename.
+func safeFilename(name string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return r
+		}
+		return '-'
+	}, strings.TrimSpace(name))
+	if strings.Trim(cleaned, "-") == "" {
+		return "gallery"
+	}
+	return cleaned
+}
+
+// writeZip sends a single file directly, or streams multiple files as a zip attachment.
+func (s *Server) writeZip(w http.ResponseWriter, r *http.Request, photoIDs []int64, filename string) {
+	includeRaw := r.URL.Query().Get("raw") == "true"
 	files, err := s.db.PhotoFilePaths(r.Context(), photoIDs)
 	if err != nil {
 		slog.Error("Download request rejected because of database query error: ", "err", err)
 		http.Error(w, "Invalid selection", http.StatusBadRequest)
 		return
 	}
+	type downloadItem struct {
+		path      string
+		processed bool
+	}
+	var items []downloadItem
+	seen := make(map[string]bool)
+	for _, file := range files {
+		base := strings.TrimSuffix(file.Path, filepath.Ext(file.Path))
+		paths := []string{file.Path, base + ".xmp", base + ".json"}
+		if includeRaw && file.RawPath != "" {
+			paths = append(paths, file.RawPath)
+		}
+		for i, path := range paths {
+			fullPath, relative, err := downloadPath(s.config.PhotoRoot, path)
+			if err != nil {
+				http.Error(w, "Invalid file path", http.StatusBadRequest)
+				return
+			}
+			if seen[relative] {
+				continue
+			}
+			info, err := os.Stat(fullPath)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil || !info.Mode().IsRegular() {
+				slog.Error("download file unavailable", "path", path, "error", err)
+				http.Error(w, "Could not read download", http.StatusInternalServerError)
+				return
+			}
+			seen[relative] = true
+			items = append(items, downloadItem{path: path, processed: i == 0 && r.URL.Query().Get("processed") == "true"})
+		}
+	}
+	if len(items) == 0 {
+		http.Error(w, "No files available to download", http.StatusNotFound)
+		return
+	}
+	if len(items) == 1 {
+		item := items[0]
+		name, file, data, err := prepareDownloadFile(r.Context(), s.config.PhotoRoot, item.path, item.processed)
+		if err != nil || file == nil {
+			slog.Error("download file unavailable", "path", item.path, "error", err)
+			http.Error(w, "Could not read download", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+		base := filepath.Base(name)
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": base}))
+		if contentType := mime.TypeByExtension(filepath.Ext(base)); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		var contents io.ReadSeeker = file
+		if data != nil {
+			contents = bytes.NewReader(data)
+		}
+		http.ServeContent(w, r, base, time.Time{}, contents)
+		return
+	}
 	w.Header().Set("Content-Type", "application/zip")
-
-	//create a filename with the date-time of the request, e.g., fast-fotos-selection-2023-08-15-150405.zip
-	filename := fmt.Sprintf("fast-fotos-selection-%s.zip", time.Now().Format("2006-01-02-150405"))
-
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	archive := zip.NewWriter(w)
 	defer archive.Close()
-	for _, file := range files {
-		if err := s.addDownloadFiles(archive, file.Path, file.RawPath, includeRaw); err != nil {
+	for _, item := range items {
+		if err := addFileToArchiveWithProcessing(r.Context(), archive, s.config.PhotoRoot, item.path, item.processed); err != nil {
 			slog.Error("Download request failed while adding files to archive: ", "err", err)
-			http.Error(w, "Could not create download", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -2279,10 +2385,14 @@ func parseIDList(value string) ([]int64, error) {
 
 // addDownloadFiles adds an image, its sidecar files (.xmp, .json), and optional raw file to a zip archive.
 func (s *Server) addDownloadFiles(archive *zip.Writer, photoPath, rawPath string, includeRaw bool) error {
+	return s.addDownloadFilesWithProcessing(context.Background(), archive, photoPath, rawPath, includeRaw, false)
+}
+
+func (s *Server) addDownloadFilesWithProcessing(ctx context.Context, archive *zip.Writer, photoPath, rawPath string, includeRaw, processed bool) error {
 	base := strings.TrimSuffix(photoPath, filepath.Ext(photoPath))
-	for _, extension := range []string{filepath.Ext(photoPath), ".xmp", ".json"} {
+	for i, extension := range []string{filepath.Ext(photoPath), ".xmp", ".json"} {
 		path := base + extension
-		if err := addFileToArchive(archive, s.config.PhotoRoot, path); err != nil {
+		if err := addFileToArchiveWithProcessing(ctx, archive, s.config.PhotoRoot, path, i == 0 && processed); err != nil {
 			return err
 		}
 	}
@@ -2296,28 +2406,83 @@ func (s *Server) addDownloadFiles(archive *zip.Writer, photoPath, rawPath string
 
 // addFileToArchive reads a relative file path under root and writes its content into a zip archive entry.
 func addFileToArchive(archive *zip.Writer, root, relativePath string) error {
+	return addFileToArchiveWithProcessing(context.Background(), archive, root, relativePath, false)
+}
+
+func downloadPath(root, relativePath string) (string, string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	fullPath, err := filepath.Abs(filepath.Join(root, relativePath))
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	relative, err := filepath.Rel(root, fullPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("file path escapes photo root: %q", relativePath)
+		return "", "", fmt.Errorf("file path escapes photo root: %q", relativePath)
+	}
+	return fullPath, relative, nil
+}
+
+func prepareDownloadFile(ctx context.Context, root, relativePath string, processed bool) (string, *os.File, []byte, error) {
+	fullPath, relative, err := downloadPath(root, relativePath)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	file, err := os.Open(fullPath)
 	if os.IsNotExist(err) {
-		return nil
+		return "", nil, nil, nil
 	}
 	if err != nil {
+		return "", nil, nil, err
+	}
+	ext := strings.ToLower(filepath.Ext(relativePath))
+	if processed && (ext == ".jpg" || ext == ".jpeg" || ext == ".png") {
+		info, statErr := file.Stat()
+		if statErr != nil {
+			file.Close()
+			return "", nil, nil, statErr
+		}
+		if info.Size() <= 128<<20 {
+			data, readErr := io.ReadAll(file)
+			if readErr != nil {
+				file.Close()
+				return "", nil, nil, readErr
+			}
+			enhanced, enhanceErr := enhancePhoto(ctx, data)
+			if ctx.Err() != nil {
+				file.Close()
+				return "", nil, nil, ctx.Err()
+			}
+			if enhanceErr == nil {
+				ext := filepath.Ext(relative)
+				return strings.TrimSuffix(relative, ext) + "-processed" + ext, file, enhanced, nil
+			}
+			slog.Warn("could not process photo; including original", "path", relativePath, "error", enhanceErr)
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				file.Close()
+				return "", nil, nil, err
+			}
+		} else {
+			slog.Warn("photo too large to process; including original", "path", relativePath)
+		}
+	}
+	return relative, file, nil, nil
+}
+
+func addFileToArchiveWithProcessing(ctx context.Context, archive *zip.Writer, root, relativePath string, processed bool) error {
+	name, file, data, err := prepareDownloadFile(ctx, root, relativePath, processed)
+	if err != nil || file == nil {
 		return err
 	}
 	defer file.Close()
-	entry, err := archive.Create(relative)
+	entry, err := archive.Create(name)
 	if err != nil {
+		return err
+	}
+	if data != nil {
+		_, err = entry.Write(data)
 		return err
 	}
 	_, err = io.Copy(entry, file)

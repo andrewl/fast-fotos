@@ -75,6 +75,14 @@ Escape returns to it and Page Up/Page Down navigate to the previous or next phot
 When an associated raw file is present beside the image, the image page shows a
 **Download raw** link.
 
+Photo and gallery pages also offer a processed download: JPEG and PNG images receive
+mild automatic exposure correction, sharpening and a subtle vignette. Raw files
+and sidecars remain unchanged. Other formats, or images that cannot be processed,
+are included unchanged. JPEGs are re-encoded and PNGs are converted to 8-bit;
+PNG metadata is not retained. Successfully processed filenames have a `-processed`
+suffix. The source files are never modified. Downloads containing just one file
+are sent directly; multiple files are packaged as a ZIP.
+
 The Compose image also provisions ONNX Runtime 1.29.0 and the offline object-detection runtime and
 YOLOv11 Small model into the persistent `fast-fotos-models` volume. Set
 `OBJECT_AUTO_INSTALL=false` to disable this download; `OBJECT_MODEL_DIR` controls

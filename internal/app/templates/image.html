@@ -8,6 +8,9 @@
   <h2>Details</h2>
   <label><input data-photo-selection type="checkbox" value="{{.Photo.ID}}"{{if index .Selected .Photo.ID}} checked{{end}}> Select photo</label>
   {{if .Photo.RawPath}}<p>Raw file available</p><a href="/raw/{{.Photo.ID}}">Download raw</a>{{end}}
+  <a href="/download?ids={{.Photo.ID}}&amp;raw=true" download>Download{{if .Photo.RawPath}} with raw file{{end}}</a>{{if .Photo.RawPath}}
+  <a href="/download?ids={{.Photo.ID}}&amp;raw=false" download>Download without raw file</a>{{end}}
+  <a href="/download/?ids={{.Photo.ID}}&amp;raw=true&amp;processed=true" download>Download processed{{if .Photo.RawPath}} with raw file{{end}}</a>
   <dl>
     <dt>Captured</dt><dd>{{photoTakenAt .Photo.TakenAt}}</dd>
     {{if .Photo.Location}}<dt>Location</dt><dd>{{.Photo.Location}}</dd>{{end}}

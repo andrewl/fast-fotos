@@ -25,9 +25,9 @@ const (
 )
 
 const (
-	inputSizeSSD      = 400
-	inputSizeYOLOv8   = 640
-	confidenceCutoff  = 0.45
+	inputSizeSSD     = 400
+	inputSizeYOLOv8  = 640
+	confidenceCutoff = 0.45
 )
 
 // Detector identifies a small set of objects in an image.
