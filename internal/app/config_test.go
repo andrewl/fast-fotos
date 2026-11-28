@@ -71,3 +71,29 @@ func TestConfigThumbnailMaxDimension(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigFromArgs(t *testing.T) {
+	t.Setenv("PHOTO_ROOT", "")
+	t.Setenv("DATABASE_PATH", "")
+	t.Setenv("INSTANCE_NAME", "Env")
+	config, err := ConfigFromArgs([]string{"-name", "John's", "/photos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.PhotoRoot != "/photos" || config.DatabasePath != "fast-fotos.db" || config.InstanceName != "John's" {
+		t.Fatalf("unexpected config: %+v", config)
+	}
+	if config, err = ConfigFromArgs([]string{"/photos"}); err != nil || config.InstanceName != "Env" {
+		t.Fatalf("environment instance name: %+v, %v", config, err)
+	}
+	t.Setenv("PHOTO_ROOT", "/env-photos")
+	if config, err = ConfigFromArgs([]string{"/photos"}); err != nil || config.PhotoRoot != "/env-photos" {
+		t.Fatalf("PHOTO_ROOT should win: %+v, %v", config, err)
+	}
+	t.Setenv("PHOTO_ROOT", "")
+	for _, args := range [][]string{nil, {"a", "b"}, {"-bogus"}} {
+		if _, err := ConfigFromArgs(args); err == nil {
+			t.Fatalf("ConfigFromArgs(%v) succeeded, want an error", args)
+		}
+	}
+}

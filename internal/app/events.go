@@ -11,14 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
-	eventMaxGap      = 48 * time.Hour
-	eventMaxDuration = 14 * 24 * time.Hour
-	eventMaxDistance = 50.0 // kilometres from the first reliable location
-	eventMinPhotos   = 3
+	eventMaxGap            = 48 * time.Hour
+	eventMaxDuration       = 14 * 24 * time.Hour
+	eventMaxDistance       = 15.0 // kilometres from the first reliable location and from the previous one
+	eventMinPhotos         = 5
+	eventMaxRegionDistance = 100.0
 )
 
 type Event struct {
@@ -68,17 +68,52 @@ type eventGroup struct {
 	name   string
 }
 
+// eventJoinable reports whether p continues group g, whose latest photo is last. Nearby photos
+// always join; photos in the same region (eg an island group) may be further apart.
+func eventJoinable(g eventGroup, last, p eventPhoto) bool {
+	if p.taken.Sub(last.taken) > eventMaxGap || p.taken.Sub(g.start) > eventMaxDuration {
+		return false
+	}
+	d := eventDistance(last, p)
+	region := strings.TrimSpace(p.region)
+	return d <= eventMaxDistance || (region != "" && region == strings.TrimSpace(last.region) && d <= eventMaxRegionDistance)
+}
+
+// homeSettlement is the most common settlement among measured GPS photos, assumed to be home.
+func homeSettlement(photos []eventPhoto) string {
+	counts := make(map[string]int)
+	best, bestCount := "", 0
+	for _, p := range photos {
+		name := strings.TrimSpace(p.settlement)
+		if name == "" || !p.reliableLocation() {
+			continue
+		}
+		counts[name]++
+		if c := counts[name]; c > bestCount || (c == bestCount && name < best) {
+			best, bestCount = name, c
+		}
+	}
+	return best
+}
+
 // groupEvents uses only measured GPS coordinates as anchors, avoiding inferred locations.
 func groupEvents(photos []eventPhoto) []eventGroup {
 	var groups []eventGroup
 	var last eventPhoto
+	home := homeSettlement(photos)
+	var anchors []eventPhoto
 	for _, p := range photos {
-		if !p.reliableLocation() {
-			continue
+		if p.reliableLocation() && (home == "" || p.settlement != home) {
+			anchors = append(anchors, p)
 		}
-		if len(groups) == 0 || p.taken.Sub(last.taken) > eventMaxGap ||
-			p.taken.Sub(groups[len(groups)-1].start) > eventMaxDuration ||
-			eventDistance(groups[len(groups)-1].photos[0], p) > eventMaxDistance {
+	}
+	for i, p := range anchors {
+		if len(groups) > 0 && eventJoinable(groups[len(groups)-1], last, p) {
+			// joins the current group
+		} else if len(groups) > 0 && i+1 < len(anchors) && p.taken.Sub(last.taken) <= eventMaxGap &&
+			eventJoinable(groups[len(groups)-1], last, anchors[i+1]) {
+			continue // lone outlier between photos of the current event
+		} else {
 			groups = append(groups, eventGroup{start: p.taken})
 		}
 		g := &groups[len(groups)-1]
@@ -272,7 +307,7 @@ func scanEvent(row rowScanner) (Event, error) {
 	return e, err
 }
 
-const eventColumns = `e.id, CASE WHEN e.custom_name <> '' THEN e.custom_name ELSE e.auto_name END,
+const eventColumns = `e.id, e.auto_name,
 	e.start_at, e.end_at, COUNT(ep.photo_id),
 	(SELECT ep2.photo_id FROM event_photos ep2 JOIN photos p ON p.id = ep2.photo_id
 	 WHERE ep2.event_id = e.id ORDER BY p.taken_at, p.id LIMIT 1), e.hidden`
@@ -364,23 +399,36 @@ func (s *Server) eventsPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "events", PageData{Page: "events", Event: &event, Photos: photos, ReturnURL: returnURL, CollectionName: event.Name})
 }
 
-func (s *Server) updateEventName(w http.ResponseWriter, r *http.Request) {
+func (s *Server) copyEventToGallery(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		http.NotFound(w, r)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid event name", http.StatusBadRequest)
+	event, err := s.db.EventByID(r.Context(), id)
+	if err != nil {
+		http.NotFound(w, r)
 		return
 	}
-	names, ok := r.PostForm["name"]
-	if !ok || len(names) != 1 || !utf8.ValidString(names[0]) || utf8.RuneCountInString(names[0]) > 200 {
-		http.Error(w, "Invalid event name", http.StatusBadRequest)
+	photos, err := s.db.PhotosForEvent(r.Context(), id)
+	if err != nil || len(photos) == 0 {
+		http.Error(w, "Could not load event photos", http.StatusInternalServerError)
 		return
 	}
-	s.updateEvent(w, r, id, `UPDATE events SET custom_name = ? WHERE id = ?`, strings.TrimSpace(names[0]), fmt.Sprintf("/events/%d", id))
+	ids := make([]int64, len(photos))
+	for i, p := range photos {
+		ids[i] = p.ID
+	}
+	galleryID, err := s.db.CreateGallery(r.Context(), event.Name+" ("+event.DateRange()+")")
+	if err == nil {
+		_, err = s.db.AddPhotosToGallery(r.Context(), galleryID, ids)
+	}
+	if err != nil {
+		slog.Error("copy event to gallery", "id", id, "error", err)
+		http.Error(w, "Could not create gallery", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/galleries/%d", galleryID), http.StatusSeeOther)
 }
 
 func (s *Server) setEventHidden(w http.ResponseWriter, r *http.Request) {

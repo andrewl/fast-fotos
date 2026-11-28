@@ -135,3 +135,12 @@ func TestDLNABrowseFoldersAndResources(t *testing.T) {
 func itoa(value int64) string {
 	return strconv.FormatInt(value, 10)
 }
+
+func TestDLNAFriendlyName(t *testing.T) {
+	if got := dlnaFriendlyName(""); got != "Fast Fotos" {
+		t.Fatalf("default name = %q", got)
+	}
+	if got := dlnaFriendlyName("A&B"); got != "Fast Fotos - A&amp;B" {
+		t.Fatalf("escaped name = %q", got)
+	}
+}

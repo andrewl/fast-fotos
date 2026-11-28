@@ -86,7 +86,8 @@ func TestGalleryDescriptionRoutes(t *testing.T) {
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, `class="gallery-description"`) ||
 		!strings.Contains(body, "First line\n&lt;script&gt;") || strings.Contains(body, "<script>alert('x')</script>") ||
-		!strings.Contains(body, `name="description"`) {
+		!strings.Contains(body, `name="description"`) || !strings.Contains(body, ">edit</span>") ||
+		strings.Index(body, "</h1>") > strings.Index(body, `class="gallery-description"`) {
 		t.Fatalf("gallery page: %d %s", response.Code, body)
 	}
 	for _, path := range []string{"/galleries/0/description", "/galleries/999/description", "/galleries/invalid/description"} {

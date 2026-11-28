@@ -16,7 +16,7 @@ import (
 // main initializes configuration, creates the application server, and starts the HTTP listener.
 func main() {
 	configureLogger(slog.LevelInfo)
-	config, err := app.ConfigFromEnvironment()
+	config, err := app.ConfigFromArgs(os.Args[1:])
 	if err != nil {
 		slog.Error("load configuration", "error", err)
 		os.Exit(1)

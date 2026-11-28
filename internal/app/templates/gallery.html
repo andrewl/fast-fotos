@@ -14,6 +14,18 @@
       </details>
     </div>
 </div>
+{{if and .Collection (eq .Page "galleries") (ne .Collection.ID 0)}}{{with .Collection}}
+{{if .Description}}<div class="gallery-description">{{.Description}}</div>{{end}}
+<details class="gallery-description-editor">
+  <summary title="Edit gallery text" aria-label="Edit gallery text"><span class="material-symbols-outlined" aria-hidden="true">edit</span></summary>
+  <form method="post" action="/galleries/{{.ID}}/description">
+    <label for="gallery-description">Gallery text</label>
+    <textarea id="gallery-description" name="description" rows="5" maxlength="10000">
+{{.Description}}</textarea>
+    <button type="submit">Save text</button>
+  </form>
+</details>
+{{end}}{{end}}
 <div class="grid">
   {{range .Photos}}<div class="photo"><input data-photo-selection type="checkbox" value="{{.ID}}"{{if index $.Selected .ID}} checked{{end}} aria-label="Select {{.Path}}"><a class="photo-preview-trigger" href="{{imagePath .ID $.ReturnURL}}" data-photo-id="{{.ID}}" data-photo-path="{{.Path}}" data-photo-taken-at="{{photoTakenAt .TakenAt}}" data-photo-location="{{.Location}}" aria-label="View {{.Path}} larger"><img src="/thumbnails/{{.ID}}" alt="" loading="lazy"></a><span>{{photoTakenAt .TakenAt}}</span></div>
 {{else}}<p>No photos found</p>{{end}}

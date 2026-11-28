@@ -84,6 +84,17 @@ func dlnaLocalAddress() string {
 	return "127.0.0.1"
 }
 
+// dlnaFriendlyName returns the XML-escaped device name, including the instance name when set.
+func dlnaFriendlyName(instance string) string {
+	name := "Fast Fotos"
+	if instance != "" {
+		name += " - " + instance
+	}
+	var escaped strings.Builder
+	_ = xml.EscapeText(&escaped, []byte(name))
+	return escaped.String()
+}
+
 // dlnaDescription serves the UPnP device description XML for this media server.
 // Inputs: an HTTP response writer and request; output: a device-description XML response.
 func (s *Server) dlnaDescription(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +104,7 @@ func (s *Server) dlnaDescription(w http.ResponseWriter, r *http.Request) {
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <device>
     <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
-    <friendlyName>Fast Fotos</friendlyName>
+    <friendlyName>%s</friendlyName>
     <manufacturer>Fast Fotos</manufacturer>
     <manufacturerURL>https://github.com/andrewl/fast-fotos</manufacturerURL>
     <modelName>Fast Fotos Media Server</modelName>
@@ -110,7 +121,7 @@ func (s *Server) dlnaDescription(w http.ResponseWriter, r *http.Request) {
       </service>
     </serviceList>
   </device>
-</root>`, dlnaUDN)
+</root>`, dlnaFriendlyName(s.config.InstanceName), dlnaUDN)
 	w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 	_, _ = io.WriteString(w, body)
 	_ = address

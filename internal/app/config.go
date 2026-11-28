@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"flag"
+	"io"
 	"log/slog"
 	"os"
 	"runtime"
@@ -18,6 +20,7 @@ type Config struct {
 	IndexWorkers          int
 	ThumbnailMaxDimension int
 	ResizeFilter          string
+	InstanceName          string
 	GeoNamesDir           string
 	ObjectModelDir        string
 	// ONNX thread counts; 0 uses the ONNX Runtime default.
@@ -27,7 +30,25 @@ type Config struct {
 
 // ConfigFromEnvironment loads and validates application configuration settings from environment variables.
 func ConfigFromEnvironment() (Config, error) {
+	return ConfigFromArgs(nil)
+}
+
+// ConfigFromArgs loads configuration from environment variables and command-line arguments
+// (excluding the program name): [-name NAME] [PHOTO_DIR]. PHOTO_ROOT takes precedence over
+// the PHOTO_DIR argument, and -name takes precedence over INSTANCE_NAME.
+func ConfigFromArgs(args []string) (Config, error) {
+	flags := flag.NewFlagSet("fast-fotos", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	instanceName := flags.String("name", "", "instance `name` shown after the application name and in the DLNA name")
+	flags.StringVar(instanceName, "n", "", "shorthand for -name")
+	if err := flags.Parse(args); err != nil {
+		return Config{}, errors.New("usage: fast-fotos [-name NAME] [PHOTO_DIR]: " + err.Error())
+	}
+	if flags.NArg() > 1 {
+		return Config{}, errors.New("usage: fast-fotos [-name NAME] [PHOTO_DIR]")
+	}
 	config := Config{
+		InstanceName:          strings.TrimSpace(os.Getenv("INSTANCE_NAME")),
 		DatabasePath:          os.Getenv("DATABASE_PATH"),
 		PhotoRoot:             os.Getenv("PHOTO_ROOT"),
 		ListenAddress:         os.Getenv("LISTEN_ADDR"),
@@ -38,11 +59,20 @@ func ConfigFromEnvironment() (Config, error) {
 		GeoNamesDir:           os.Getenv("GEONAMES_DIR"),
 		ObjectModelDir:        os.Getenv("OBJECT_MODEL_DIR"),
 	}
+	if *instanceName != "" {
+		config.InstanceName = strings.TrimSpace(*instanceName)
+	}
+	if len([]rune(config.InstanceName)) > 100 {
+		return Config{}, errors.New("instance name must be at most 100 characters")
+	}
+	if config.PhotoRoot == "" && flags.NArg() == 1 {
+		config.PhotoRoot = flags.Arg(0)
+	}
 	if config.DatabasePath == "" {
 		config.DatabasePath = "fast-fotos.db"
 	}
 	if config.PhotoRoot == "" {
-		return Config{}, errors.New("PHOTO_ROOT is required")
+		return Config{}, errors.New("PHOTO_ROOT or a photo directory argument is required")
 	}
 	if config.ListenAddress == "" {
 		config.ListenAddress = ":8090"

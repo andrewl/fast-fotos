@@ -4,14 +4,9 @@
   {{if .Event}}
   <p><a href="/events">Back to events</a></p>
   <p>{{.Event.DateRange}} · {{.Event.Count}} photos{{if .Event.Hidden}} · Hidden{{end}} · <a href="/events/{{.Event.ID}}/map">View on map</a></p>
-  <details class="event-editor">
-    <summary>Edit event name</summary>
-    <form method="post" action="/events/{{.Event.ID}}/name">
-      <label>Event name <input name="name" value="{{.Event.Name}}" maxlength="200"></label>
-      <button type="submit">Save name</button>
-      <small>Leave blank to use the automatic name.</small>
-    </form>
-  </details>
+  <form method="post" action="/events/{{.Event.ID}}/gallery">
+    <button type="submit">Copy to gallery</button>
+  </form>
   <form method="post" action="/events/{{.Event.ID}}/{{if .Event.Hidden}}restore{{else}}hide{{end}}">
     <button type="submit">{{if .Event.Hidden}}Restore event{{else}}Hide event{{end}}</button>
   </form>

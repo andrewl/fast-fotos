@@ -139,6 +139,7 @@ type Collection = Gallery
 // PageData contains all contextual view data passed to HTML templates for rendering.
 type PageData struct {
 	Page               string
+	InstanceName       string
 	Photos             []Photo
 	Photo              *Photo
 	Months             []Month
@@ -322,7 +323,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /this-week", s.thisweek)
 	mux.HandleFunc("GET /events", s.eventsPage)
 	mux.HandleFunc("GET /events/", s.eventsPage)
-	mux.HandleFunc("POST /events/{id}/name", s.updateEventName)
+	mux.HandleFunc("POST /events/{id}/gallery", s.copyEventToGallery)
 	mux.HandleFunc("POST /events/{id}/hide", s.setEventHidden)
 	mux.HandleFunc("POST /events/{id}/restore", s.setEventHidden)
 	mux.HandleFunc("GET /locations", s.locations)
@@ -2704,6 +2705,7 @@ func (s *Server) render(w http.ResponseWriter, name string, data PageData) {
 		}
 	}
 	data.Collections = galleries
+	data.InstanceName = s.config.InstanceName
 	if data.Selected == nil {
 		selected, err := s.db.SelectedPhotoIDs(context.Background())
 		if err != nil {

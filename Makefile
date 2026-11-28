@@ -15,6 +15,9 @@ help:
 dev:
 	LOG_LEVEL=debug PHOTO_ROOT=./test-photos DATABASE_PATH=./test-data/fast-fotos.db go run ./cmd/fast-fotos
 
+andrew:
+	LOG_LEVEL=debug PHOTO_ROOT=./test-photos DATABASE_PATH=./andrew-data/fast-fotos-andrew.db go run ./cmd/fast-fotos
+
 test: test-unit test-browser
 
 test-unit:
